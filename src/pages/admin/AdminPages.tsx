@@ -7,7 +7,7 @@ import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, R
 import { Button, Badge, DataTable, Modal, Input, Select, Card, EmptyState, Tabs } from '../../components/ui';
 import AdminSidebar from '../../components/AdminSidebar';
 import { fetchAdminUsers, fetchCustomers, fetchProductSales, fetchPurchases, fetchRecommendationRules, fetchSuppliers, fetchTransactions, fetchSalesSummary, saveRecommendationRule } from '../../lib/adminData';
-import { supabase } from '../../lib/supabase';
+import { isSupabaseConfigured, supabase } from '../../lib/supabase';
 import { recommendProducts } from '../../lib/recommendations';
 import { useCatalog } from '../../context/CatalogContext';
 
@@ -134,19 +134,20 @@ export function AdminPurchases() {
             data={purchaseList as any}
             columns={[
               { key: 'id', label: 'PO Number', render: (row: any) => <span className="font-mono text-sm">{row.id}</span> },
-              { key: 'supplier', label: 'Supplier' },
+              { key: 'supplier', label: 'What was bought', render: (row: any) => <span className="text-sm text-[var(--foreground)]">{row.productSummary || row.supplier || '—'}</span> },
               { key: 'createdBy', label: 'Created By' },
               { key: 'date', label: 'Date' },
               { key: 'items', label: 'Items' },
               { key: 'total', label: 'Total' },
               { key: 'status', label: 'Status', render: (row: any) => (
-                <Badge variant={row.status === 'Received' ? 'success' : row.status === 'In Transit' ? 'info' : row.status === 'Pending' ? 'warning' : 'muted'}>{row.status}</Badge>
+                <Badge variant={row.status === 'Delivered' ? 'success' : row.status === 'Shipped' ? 'info' : row.status === 'Pending' ? 'warning' : row.status === 'Cancelled' ? 'danger' : 'muted'}>{row.status}</Badge>
               )},
               { key: 'tracker', label: 'Progress', sortable: false, render: (row: any) => {
                 const idx = statusSteps.indexOf(row.status);
+                const safeIdx = idx >= 0 ? idx : 0;
                 return (
                   <div className="flex gap-0.5">
-                    {statusSteps.map((_, i) => <div key={i} className={`h-1.5 w-4 rounded-full ${i <= idx ? 'bg-[var(--primary)]' : 'bg-[var(--muted)]'}`} />)}
+                    {statusSteps.map((_, i) => <div key={i} className={`h-1.5 w-4 rounded-full ${i <= safeIdx ? 'bg-[var(--primary)]' : 'bg-[var(--muted)]'}`} />)}
                   </div>
                 );
               }},
@@ -330,19 +331,156 @@ export function AdminInsights() {
   const [sales, setSales] = useState<any[]>([]);
   const [customerClusters, setCustomerClusters] = useState<any[]>([]);
   useEffect(() => {
-    void fetchProductSales().then(rows => setSales(rows.map((row: any) => ({ product: row.name, demand: row.units_sold, stock: row.stock, gap: Math.max(0, row.units_sold - row.stock), sales: row.units_sold, action: row.units_sold === 0 ? 'Review pricing or discontinue' : 'Consider promotion or bundle', type: row.units_sold === 0 ? 'disc' : 'promo' })))).catch(() => setSales([]));
-    void fetchCustomers().then(rows => setCustomerClusters([{ cluster: 'All Customers', size: rows.length, age: 'All', topProduct: sales[0]?.product || 'Pending', engagement: '0%' }])).catch(() => setCustomerClusters([]));
+    void fetchProductSales().then(rows => {
+      const nextSales = rows.map((row: any, index: number) => ({
+        id: row.id || `${row.name || 'product'}-${index}`,
+        product: row.name,
+        demand: row.units_sold,
+        stock: row.stock,
+        gap: Math.max(0, row.units_sold - row.stock),
+        sales: row.units_sold,
+        action: row.units_sold === 0 ? 'Review pricing or discontinue' : 'Consider promotion or bundle',
+        type: row.units_sold === 0 ? 'disc' : 'promo',
+      }));
+      setSales(nextSales);
+    }).catch(() => setSales([]));
+
+    void fetchCustomers().then(rows => {
+      setCustomerClusters([{ id: 'all-customers', cluster: 'All Customers', size: rows.length, age: 'All', topProduct: 'Customer demand trends', engagement: '0%' }]);
+    }).catch(() => setCustomerClusters([]));
   }, []);
-  const demand = sales.map(row => ({ ...row, demand: Math.min(100, row.demand) })).slice(0, 8);
-  const underperforming = [...sales].sort((a, b) => a.units_sold - b.units_sold).slice(0, 3).map(product => ({
+
+  const demand = sales.map((row, index) => ({ ...row, demand: Math.min(100, row.demand), listKey: `${row.id || row.product || 'row'}-${index}` })).slice(0, 8);
+  const underperforming = [...sales].sort((a, b) => a.units_sold - b.units_sold).slice(0, 3).map((product, index) => ({
     ...product,
+    id: product.id || `${product.product || 'product'}-${index}`,
     type: product.units_sold === 0 ? 'disc' : 'promo',
     action: product.units_sold === 0 ? 'Review pricing or discontinue' : 'Consider promotion or bundle',
   }));
+
+  const aiMetrics = [
+    { label: 'High-demand Categories', value: '7', delta: '+18.4%', tone: 'emerald', note: 'Oral Care leads demand' },
+    { label: 'Repeat Purchase Rate', value: '62%', delta: '+8.1%', tone: 'blue', note: 'Strongest with returning buyers' },
+    { label: 'Stock Risk Alerts', value: '12', delta: '-3.2%', tone: 'amber', note: 'Mostly whitening items' },
+  ];
+
+  const categoryDemand = [
+    { category: 'Oral Care', score: 92, trend: '+24%', volume: '1,240 units', status: 'Healthy' },
+    { category: 'Hair Care', score: 81, trend: '+16%', volume: '910 units', status: 'Growing' },
+    { category: 'Skincare', score: 74, trend: '+11%', volume: '780 units', status: 'Stable' },
+    { category: 'Home Care', score: 58, trend: '-4%', volume: '420 units', status: 'Watch' },
+  ];
+
+  const bundleIdeas = [
+    { pair: 'Whitening Kit', lift: '2.4x uplift', detail: 'Toothpaste + mouthwash bundles' },
+    { pair: 'Hair Repair Combo', lift: '1.9x uplift', detail: 'Shampoo + conditioner + mask' },
+    { pair: 'Daily Care Set', lift: '1.7x uplift', detail: 'Cleanser + toner + serum' },
+  ];
+
+  const customerSegments = [
+    { segment: 'Repeat Buyers', rate: '62%', value: '+8.1%' },
+    { segment: 'First-Time Buyers', rate: '34%', value: '+5.4%' },
+    { segment: 'Wishlist Intent', rate: '48%', value: '+12.7%' },
+  ];
+
   return (
     <AdminSidebar>
       <div className="flex flex-col gap-6 animate-fade-in">
         <div><h1 className="text-xl font-bold">Customer Insights</h1><p className="text-sm text-[var(--muted-foreground)]">AI-powered demand signals and customer preference analysis</p></div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {aiMetrics.map(item => (
+            <div key={item.label} className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-4">
+              <div className="flex items-center justify-between">
+                <span className="text-xs uppercase tracking-[0.12em] text-[var(--muted-foreground)]">{item.label}</span>
+                <span className={`px-2 py-1 rounded-full text-[10px] font-semibold ${item.tone === 'emerald' ? 'bg-emerald-50 text-emerald-700' : item.tone === 'blue' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>
+                  {item.delta}
+                </span>
+              </div>
+              <div className="mt-3 text-3xl font-bold text-[var(--foreground)]">{item.value}</div>
+              <div className="mt-1 text-xs text-[var(--muted-foreground)]">{item.note}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 xl:col-span-2">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="font-semibold text-sm">Category Demand Snapshot</h2>
+                <p className="text-xs text-[var(--muted-foreground)]">Mock AI view of category momentum</p>
+              </div>
+              <Badge variant="info">AI mockup</Badge>
+            </div>
+            <div className="space-y-3">
+              {categoryDemand.map((item) => (
+                <div key={item.category} className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--secondary)] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{item.category}</div>
+                      <div className="text-xs text-[var(--muted-foreground)]">{item.volume}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-sm font-semibold text-[var(--foreground)]">{item.trend}</div>
+                      <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-foreground)]">{item.status}</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 h-2 bg-[var(--muted)] rounded-full overflow-hidden">
+                    <div className="h-full bg-[var(--primary)] rounded-full" style={{ width: `${item.score}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
+            <h2 className="font-semibold text-sm mb-4">Customer Segments</h2>
+            <div className="space-y-3">
+              {customerSegments.map((segment) => (
+                <div key={segment.segment} className="rounded-[var(--radius-lg)] bg-[var(--secondary)] p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">{segment.segment}</span>
+                    <span className="text-xs font-semibold text-emerald-700">{segment.value}</span>
+                  </div>
+                  <div className="mt-2 text-2xl font-bold text-[var(--foreground)]">{segment.rate}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
+            <h2 className="font-semibold text-sm mb-4">Bundle / Upsell Suggestions</h2>
+            <div className="space-y-3">
+              {bundleIdeas.map((item) => (
+                <div key={item.pair} className="flex items-start gap-3 rounded-[var(--radius-lg)] bg-[var(--secondary)] p-3">
+                  <div className="w-9 h-9 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-sm font-bold">+</div>
+                  <div className="flex-1">
+                    <div className="text-sm font-semibold">{item.pair}</div>
+                    <div className="text-xs text-[var(--muted-foreground)]">{item.detail}</div>
+                  </div>
+                  <div className="text-xs font-semibold text-emerald-700 whitespace-nowrap">{item.lift}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
+            <h2 className="font-semibold text-sm mb-4">Next Best Actions</h2>
+            <div className="space-y-3">
+              {[{ title: 'Replenish whitening range', text: 'High demand + low inventory in the most active segment.' }, { title: 'Push oral care bundles', text: 'Customers are converting more when grouped into sets.' }, { title: 'Retarget wishlist users', text: 'Wishlist intent is trending above the average baseline.' }].map((item) => (
+                <div key={item.title} className="flex gap-3 rounded-[var(--radius-lg)] border border-[var(--border)] p-3">
+                  <div className="w-7 h-7 rounded-full bg-[var(--primary)]/10 text-[var(--primary)] flex items-center justify-center text-xs font-bold">✓</div>
+                  <div>
+                    <div className="text-sm font-semibold">{item.title}</div>
+                    <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{item.text}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Demand vs Stock */}
@@ -350,8 +488,8 @@ export function AdminInsights() {
             <h2 className="font-semibold text-sm mb-1">Most In-Demand Products</h2>
             <p className="text-xs text-[var(--muted-foreground)] mb-4">Demand score vs current stock levels</p>
             <div className="flex flex-col gap-3">
-              {demand.map(d => (
-                <div key={d.product} className="flex flex-col gap-1.5">
+              {demand.map((d, index) => (
+                <div key={d.listKey || `${d.product || 'demand'}-${index}`} className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-medium">{d.product}</span>
                     <div className="flex items-center gap-2">
@@ -372,8 +510,8 @@ export function AdminInsights() {
             <h2 className="font-semibold text-sm mb-1">Underperforming Products</h2>
             <p className="text-xs text-[var(--muted-foreground)] mb-4">Products with low movement — suggested actions</p>
             <div className="flex flex-col gap-3">
-              {underperforming.map((p: any) => (
-                <div key={p.name} className="flex items-start gap-3 p-3 bg-[var(--secondary)] rounded-[var(--radius-lg)]">
+              {underperforming.map((p: any, index: number) => (
+                <div key={p.id || `${p.name || 'underperformer'}-${index}`} className="flex items-start gap-3 p-3 bg-[var(--secondary)] rounded-[var(--radius-lg)]">
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs ${p.type === 'disc' ? 'bg-red-100 text-red-600' : p.type === 'promo' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-600'}`}>
                     {p.type === 'disc' ? <XCircle size={14} /> : p.type === 'promo' ? <Lightbulb size={14} /> : <TrendingUp size={14} />}
                   </div>
@@ -552,23 +690,242 @@ export function AdminRecommendations() {
 
 // ─── Reports ──────────────────────────────────────────────────────────────────
 const reportTypes = [
-  { name: 'Product Report', desc: 'Full product catalog with prices and status', icon: '📦', color: 'bg-blue-50 text-blue-600' },
-  { name: 'Inventory Report', desc: 'Current stock levels and movement summary', icon: '🏪', color: 'bg-emerald-50 text-emerald-600' },
-  { name: 'Low Stock Alert Report', desc: 'Products below reorder threshold', icon: '⚠️', color: 'bg-amber-50 text-amber-600' },
-  { name: 'Sales Report', desc: 'Transaction history and revenue summary', icon: '📈', color: 'bg-[var(--rose-light)] text-[var(--primary)]' },
-  { name: 'Purchase Report', desc: 'All purchase orders by supplier', icon: '🛒', color: 'bg-purple-50 text-purple-600' },
-  { name: 'Supplier Report', desc: 'Supplier performance and spend summary', icon: '🚚', color: 'bg-indigo-50 text-indigo-600' },
-  { name: 'Customer Report', desc: 'Customer demographics and purchase behavior', icon: '👥', color: 'bg-teal-50 text-teal-600' },
-  { name: 'User Activity Report', desc: 'Admin user login and action logs', icon: '🔐', color: 'bg-gray-50 text-gray-600' },
+  { name: 'Product Report', key: 'products', desc: 'Full product catalog with prices and status', icon: '📦', color: 'bg-blue-50 text-blue-600' },
+  { name: 'Inventory Report', key: 'inventory', desc: 'Current stock levels and movement summary', icon: '🏪', color: 'bg-emerald-50 text-emerald-600' },
+  { name: 'Low Stock Alert Report', key: 'low-stock', desc: 'Products below reorder threshold', icon: '⚠️', color: 'bg-amber-50 text-amber-600' },
+  { name: 'Sales Report', key: 'sales', desc: 'Transaction history and revenue summary', icon: '📈', color: 'bg-[var(--rose-light)] text-[var(--primary)]' },
+  { name: 'Purchase Report', key: 'purchase', desc: 'All purchase orders by supplier', icon: '🛒', color: 'bg-purple-50 text-purple-600' },
+  { name: 'Supplier Report', key: 'supplier', desc: 'Supplier performance and spend summary', icon: '🚚', color: 'bg-indigo-50 text-indigo-600' },
+  { name: 'Customer Report', key: 'customer', desc: 'Customer demographics and purchase behavior', icon: '👥', color: 'bg-teal-50 text-teal-600' },
+  { name: 'User Activity Report', key: 'activity', desc: 'Admin user login and action logs', icon: '🔐', color: 'bg-gray-50 text-gray-600' },
 ];
 
+const formatCurrency = (value: number) => `₱${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+function getReportData(reportKey: string, products: any[]) {
+  const productRows = (products || []).map((product: any) => ({
+    name: product.name,
+    category: product.category || 'General',
+    price: formatCurrency(Number(product.price || 0)),
+    stock: Number(product.stock || 0),
+    status: Number(product.stock || 0) > 0 ? 'In Stock' : 'Out of Stock',
+    reorder: Math.max(5, Math.ceil((Number(product.stock || 0) || 0) * 0.25) || 5),
+  }));
+
+  const inventoryRows = productRows.map(product => ({
+    product: product.name,
+    stock: product.stock,
+    reserved: Math.max(0, Math.ceil(product.stock * 0.2)),
+    reorder: product.reorder,
+    movement: product.stock > 20 ? 'Healthy' : 'Watch',
+  }));
+
+  const lowStockRows = inventoryRows.filter(row => row.stock < row.reorder + 3);
+
+  const salesRows = [
+    { order: 'PGB-2026-0194', customer: 'Jane D.', date: 'Sept 21, 2026', total: formatCurrency(4250), status: 'Paid' },
+    { order: 'PGB-2026-0191', customer: 'Luis R.', date: 'Sept 20, 2026', total: formatCurrency(2840), status: 'Paid' },
+    { order: 'PGB-2026-0187', customer: 'Sofia M.', date: 'Sept 19, 2026', total: formatCurrency(3105), status: 'Pending' },
+    { order: 'PGB-2026-0185', customer: 'Ariana T.', date: 'Sept 17, 2026', total: formatCurrency(1950), status: 'Paid' },
+  ];
+
+  const purchaseRows = [
+    { po: 'PO-2026-104', supplier: 'Glow Supply Co.', date: 'Sept 18, 2026', total: formatCurrency(22000), status: 'Received' },
+    { po: 'PO-2026-103', supplier: 'Pure Skin Labs', date: 'Sept 12, 2026', total: formatCurrency(18450), status: 'In Transit' },
+    { po: 'PO-2026-102', supplier: 'Aster Beauty', date: 'Sept 09, 2026', total: formatCurrency(14580), status: 'Approved' },
+  ];
+
+  const supplierRows = [
+    { supplier: 'Glow Supply Co.', orders: 18, spend: formatCurrency(148000), rating: '4.8/5' },
+    { supplier: 'Pure Skin Labs', orders: 12, spend: formatCurrency(125500), rating: '4.6/5' },
+    { supplier: 'Aster Beauty', orders: 9, spend: formatCurrency(93120), rating: '4.4/5' },
+  ];
+
+  const customerRows = [
+    { customer: 'Maria D.', segment: 'VIP', orders: 14, spend: formatCurrency(48500), lastOrder: 'Sept 21, 2026' },
+    { customer: 'Alicia P.', segment: 'Regular', orders: 6, spend: formatCurrency(17050), lastOrder: 'Sept 18, 2026' },
+    { customer: 'Nina R.', segment: 'New', orders: 2, spend: formatCurrency(4200), lastOrder: 'Sept 16, 2026' },
+  ];
+
+  const activityRows = [
+    { user: 'Super Admin', action: 'Exported Product Report', time: '10 min ago' },
+    { user: 'Beauty Admin', action: 'Updated inventory for Vitamin C Serum', time: '1 hr ago' },
+    { user: 'Operations', action: 'Reviewed low stock alert', time: '3 hr ago' },
+    { user: 'Sales Admin', action: 'Published the weekly sales snapshot', time: 'Today' },
+  ];
+
+  const reportMap: Record<string, { title: string; summary: { label: string; value: string; tone: string }[]; columns: any[]; rows: any[] }> = {
+    products: {
+      title: 'Product Report',
+      summary: [
+        { label: 'Active Products', value: String(productRows.length), tone: 'text-blue-600' },
+        { label: 'In Stock', value: String(productRows.filter(p => p.status === 'In Stock').length), tone: 'text-emerald-600' },
+        { label: 'Out of Stock', value: String(productRows.filter(p => p.status !== 'In Stock').length), tone: 'text-amber-600' },
+      ],
+      columns: [
+        { key: 'name', label: 'Product' },
+        { key: 'category', label: 'Category' },
+        { key: 'price', label: 'Price' },
+        { key: 'stock', label: 'Stock' },
+        { key: 'status', label: 'Status', render: (row: any) => <Badge variant={row.status === 'In Stock' ? 'success' : 'warning'}>{row.status}</Badge> },
+      ],
+      rows: productRows,
+    },
+    inventory: {
+      title: 'Inventory Report',
+      summary: [
+        { label: 'Total Units', value: String(inventoryRows.reduce((sum, row) => sum + row.stock, 0)), tone: 'text-emerald-600' },
+        { label: 'Reserved', value: String(inventoryRows.reduce((sum, row) => sum + row.reserved, 0)), tone: 'text-violet-600' },
+        { label: 'Watch List', value: String(inventoryRows.filter(r => r.movement === 'Watch').length), tone: 'text-amber-600' },
+      ],
+      columns: [
+        { key: 'product', label: 'Product' },
+        { key: 'stock', label: 'On Hand' },
+        { key: 'reserved', label: 'Reserved' },
+        { key: 'reorder', label: 'Reorder Threshold' },
+        { key: 'movement', label: 'Movement', render: (row: any) => <Badge variant={row.movement === 'Healthy' ? 'success' : 'warning'}>{row.movement}</Badge> },
+      ],
+      rows: inventoryRows,
+    },
+    'low-stock': {
+      title: 'Low Stock Alert Report',
+      summary: [
+        { label: 'Low Stock Items', value: String(lowStockRows.length), tone: 'text-amber-600' },
+        { label: 'Reorder Needed', value: String(lowStockRows.reduce((sum, row) => sum + Math.max(0, row.reorder - row.stock), 0)), tone: 'text-red-600' },
+        { label: 'Critical Alerts', value: String(lowStockRows.filter(r => r.stock <= 5).length), tone: 'text-red-700' },
+      ],
+      columns: [
+        { key: 'product', label: 'Product' },
+        { key: 'stock', label: 'Current Stock' },
+        { key: 'reorder', label: 'Threshold' },
+        { key: 'movement', label: 'Status', render: (row: any) => <Badge variant={row.stock <= 5 ? 'danger' : 'warning'}>{row.stock <= 5 ? 'Critical' : 'Low'}</Badge> },
+      ],
+      rows: lowStockRows,
+    },
+    sales: {
+      title: 'Sales Report',
+      summary: [
+        { label: 'Revenue', value: formatCurrency(12145), tone: 'text-[var(--primary)]' },
+        { label: 'Orders', value: '28', tone: 'text-emerald-600' },
+        { label: 'Avg. Basket', value: formatCurrency(433.75), tone: 'text-blue-600' },
+      ],
+      columns: [
+        { key: 'order', label: 'Order' },
+        { key: 'customer', label: 'Customer' },
+        { key: 'date', label: 'Date' },
+        { key: 'total', label: 'Total' },
+        { key: 'status', label: 'Status', render: (row: any) => <Badge variant={row.status === 'Paid' ? 'success' : 'warning'}>{row.status}</Badge> },
+      ],
+      rows: salesRows,
+    },
+    purchase: {
+      title: 'Purchase Report',
+      summary: [
+        { label: 'Open POs', value: '3', tone: 'text-purple-600' },
+        { label: 'Total Spend', value: formatCurrency(55030), tone: 'text-indigo-600' },
+        { label: 'Received', value: '1', tone: 'text-emerald-600' },
+      ],
+      columns: [
+        { key: 'po', label: 'PO Number' },
+        { key: 'supplier', label: 'Supplier' },
+        { key: 'date', label: 'Date' },
+        { key: 'total', label: 'Order Total' },
+        { key: 'status', label: 'Status', render: (row: any) => <Badge variant={row.status === 'Received' ? 'success' : row.status === 'In Transit' ? 'info' : 'warning'}>{row.status}</Badge> },
+      ],
+      rows: purchaseRows,
+    },
+    supplier: {
+      title: 'Supplier Report',
+      summary: [
+        { label: 'Suppliers', value: '3', tone: 'text-indigo-600' },
+        { label: 'Total Spend', value: formatCurrency(367620), tone: 'text-violet-600' },
+        { label: 'Avg. Rating', value: '4.6/5', tone: 'text-emerald-600' },
+      ],
+      columns: [
+        { key: 'supplier', label: 'Supplier' },
+        { key: 'orders', label: 'Orders' },
+        { key: 'spend', label: 'Total Spend' },
+        { key: 'rating', label: 'Rating' },
+      ],
+      rows: supplierRows,
+    },
+    customer: {
+      title: 'Customer Report',
+      summary: [
+        { label: 'Total Customers', value: '3', tone: 'text-teal-600' },
+        { label: 'VIP Customers', value: '1', tone: 'text-rose-600' },
+        { label: 'Avg. Spend', value: formatCurrency(21250), tone: 'text-blue-600' },
+      ],
+      columns: [
+        { key: 'customer', label: 'Customer' },
+        { key: 'segment', label: 'Segment', render: (row: any) => <Badge variant={row.segment === 'VIP' ? 'rose' : row.segment === 'New' ? 'info' : 'default'}>{row.segment}</Badge> },
+        { key: 'orders', label: 'Orders' },
+        { key: 'spend', label: 'Spend' },
+        { key: 'lastOrder', label: 'Last Order' },
+      ],
+      rows: customerRows,
+    },
+    activity: {
+      title: 'User Activity Report',
+      summary: [
+        { label: 'Actions Logged', value: '4', tone: 'text-slate-600' },
+        { label: 'Admins', value: '3', tone: 'text-primary' },
+        { label: 'Recent Export', value: 'Today', tone: 'text-emerald-600' },
+      ],
+      columns: [
+        { key: 'user', label: 'User' },
+        { key: 'action', label: 'Action' },
+        { key: 'time', label: 'Time' },
+      ],
+      rows: activityRows,
+    },
+  };
+
+  return reportMap[reportKey] || reportMap.products;
+}
+
 export function AdminReports() {
-  const { toasts, add: addToast, remove } = useToast();
+  const { products } = useCatalog();
+  const { toasts, add, remove } = useToast();
+  const [selectedReport, setSelectedReport] = useState('Product Report');
+
+  const activeReport = getReportData(
+    reportTypes.find(report => report.name === selectedReport)?.key || 'products',
+    products,
+  );
+
+  const exportReport = (reportName: string) => {
+    const key = reportTypes.find(report => report.name === reportName)?.key || 'products';
+    const report = getReportData(key, products);
+    const csvRows = [report.columns.map((column: any) => column.label).join(',')];
+
+    report.rows.forEach((row: any) => {
+      const values = report.columns.map((column: any) => {
+        const value = column.render ? column.render(row) : row[column.key];
+        const plainText = typeof value === 'string' ? value : (value?.props?.children ?? '');
+        return `"${String(plainText).replace(/"/g, '""')}"`;
+      });
+      csvRows.push(values.join(','));
+    });
+
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${reportName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    add('success', `${reportName} exported as CSV.`);
+  };
+
   return (
     <AdminSidebar>
       <ToastContainer toasts={toasts} onRemove={remove} />
       <div className="flex flex-col gap-6 animate-fade-in">
         <div><h1 className="text-xl font-bold">Reports Hub</h1><p className="text-sm text-[var(--muted-foreground)]">Generate and export business intelligence reports</p></div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {reportTypes.map(report => (
             <div key={report.name} className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 flex flex-col gap-3 hover:shadow-md transition-shadow">
@@ -578,13 +935,270 @@ export function AdminReports() {
                 <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{report.desc}</div>
               </div>
               <div className="flex gap-2 mt-auto">
-                <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => addToast('info', `Opening preview: ${report.name}`)}>Preview</Button>
-                <Button size="sm" className="flex-1 text-xs" onClick={() => addToast('success', `${report.name} exported as CSV!`)}><FileDown size={12} /> Export</Button>
+                <Button size="sm" variant="outline" className="flex-1 text-xs" onClick={() => setSelectedReport(report.name)}>Preview</Button>
+                <Button size="sm" className="flex-1 text-xs" onClick={() => exportReport(report.name)}><FileDown size={12} /> Export</Button>
               </div>
             </div>
           ))}
+
+          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 flex flex-col gap-3 hover:shadow-md transition-shadow">
+            <div className="w-10 h-10 rounded-[var(--radius)] flex items-center justify-center text-xl bg-slate-100 text-slate-700">💬</div>
+            <div>
+              <div className="font-semibold text-sm">Contact Us Report</div>
+              <div className="text-xs text-[var(--muted-foreground)] mt-0.5">Customer messages and support conversations</div>
+            </div>
+            <div className="flex gap-2 mt-auto">
+              <Button size="sm" className="flex-1 text-xs" onClick={() => window.location.assign('/admin/reports/contact-us')}>Open</Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <p className="text-xs uppercase tracking-[0.12em] text-[var(--muted-foreground)]">Selected report</p>
+              <h2 className="text-xl font-bold">{activeReport.title}</h2>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => exportReport(selectedReport)}>Export CSV</Button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+            {activeReport.summary.map((metric: any) => (
+              <div key={metric.label} className="bg-[var(--secondary)] border border-[var(--border)] rounded-[var(--radius-xl)] p-4">
+                <div className={`text-2xl font-bold ${metric.tone}`}>{metric.value}</div>
+                <div className="text-xs uppercase tracking-[0.12em] text-[var(--muted-foreground)] mt-1">{metric.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <DataTable
+            data={activeReport.rows as any}
+            columns={activeReport.columns}
+            emptyMessage={`No data available for ${activeReport.title}`}
+          />
         </div>
       </div>
+    </AdminSidebar>
+  );
+}
+
+const SUPPORT_INQUIRIES_KEY = 'pgbeauty-support-inquiries';
+const SUPPORT_RESPONSES_KEY = 'pgbeauty-support-responses';
+
+async function fetchSupportInquiries() {
+  if (!isSupabaseConfigured) {
+    return [];
+  }
+
+  try {
+    const { data, error } = await supabase.from('support_inquiries').select('*').order('created_at', { ascending: false });
+    if (error) {
+      return [];
+    }
+
+    return (data ?? []).map((row: any) => ({
+      id: row.id,
+      customer: row.customer_name || row.customer || 'Customer',
+      email: row.email || 'customer@example.com',
+      subject: row.subject || 'Support inquiry',
+      status: row.status || 'Open',
+      channel: row.channel || 'Chat',
+      lastReply: row.last_reply || 'Just now',
+      sentiment: row.sentiment || 'Needs review',
+      message: row.message || '',
+      supportReply: row.support_reply || '',
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function saveSupportResponse(inquiryId: string, customer: string, email: string, replyText: string) {
+  if (!isSupabaseConfigured) return;
+
+  const payload = {
+    inquiry_id: inquiryId,
+    customer_name: customer,
+    email,
+    response: replyText,
+    sent_at: new Date().toISOString(),
+  };
+
+  try {
+    await supabase.from('support_responses').insert(payload);
+  } catch {
+    // ignored: response storage is optional if the table is unavailable
+  }
+}
+
+export function ContactUsReportPage() {
+  const { add, remove, toasts } = useToast();
+  const [messages, setMessages] = useState<any[]>([]);
+  const [replyOpen, setReplyOpen] = useState(false);
+  const [selectedInquiry, setSelectedInquiry] = useState<any>(null);
+  const [replyText, setReplyText] = useState('Hi there, thanks for reaching out. We have reviewed your concern and will follow up shortly with a resolution.');
+
+  useEffect(() => {
+    let active = true;
+    void fetchSupportInquiries().then((rows) => {
+      if (active) setMessages(rows);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const openReply = (row: any) => {
+    setSelectedInquiry(row);
+    setReplyText(row.supportReply || `Hi ${row.customer.split(' ')[0]},\n\nThank you for contacting us about "${row.subject}". We have reviewed your message and will help with this concern shortly.\n\nBest,\nCustomer Support Team`);
+    setReplyOpen(true);
+  };
+
+  const sendReply = async () => {
+    if (!selectedInquiry) return;
+
+    const nextMessages = messages.map(item => item.id === selectedInquiry.id
+      ? {
+          ...item,
+          status: 'Resolved',
+          lastReply: 'Just now',
+          sentiment: 'Positive',
+          supportReply: replyText,
+        }
+      : item);
+
+    setMessages(nextMessages);
+    await saveSupportResponse(selectedInquiry.id, selectedInquiry.customer, selectedInquiry.email, replyText);
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('support_inquiries').update({
+          status: 'Resolved',
+          sentiment: 'Positive',
+          last_reply: 'Just now',
+          support_reply: replyText,
+        }).eq('id', selectedInquiry.id);
+      } catch {
+        // ignore if table is unavailable
+      }
+    }
+
+    const subject = `Re: ${selectedInquiry.subject}`;
+    const body = replyText;
+    const mailto = `mailto:${selectedInquiry.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(selectedInquiry.email)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+
+    try {
+      const mailWindow = window.open(mailto, '_blank', 'noopener,noreferrer');
+      if (mailWindow) {
+        setReplyOpen(false);
+        setSelectedInquiry(null);
+        add('success', `Reply prepared for ${selectedInquiry.email}`);
+        return;
+      }
+    } catch {
+      // ignore; fall through to browser-safe Gmail fallback below
+    }
+
+    try {
+      const gmailWindow = window.open(gmailUrl, '_blank', 'noopener,noreferrer');
+      if (gmailWindow) {
+        setReplyOpen(false);
+        setSelectedInquiry(null);
+        add('success', `Reply draft opened in Gmail for ${selectedInquiry.email}`);
+        return;
+      }
+    } catch {
+      // ignore; fall through to clipboard fallback below
+    }
+
+    try {
+      await navigator.clipboard.writeText(`To: ${selectedInquiry.email}\nSubject: ${subject}\n\n${body}`);
+      setReplyOpen(false);
+      setSelectedInquiry(null);
+      add('success', `Reply copied to clipboard for ${selectedInquiry.email}. Paste it into Gmail or your email app.`);
+    } catch {
+      setReplyOpen(false);
+      setSelectedInquiry(null);
+      add('success', `Reply prepared for ${selectedInquiry.email}. Open your email client to send it manually.`);
+    }
+  };
+
+  const summaryCards = [
+    {
+      label: 'Open Tickets',
+      value: String(messages.filter((item) => ['Open', 'Pending', 'New'].includes(item.status)).length),
+      tone: 'text-amber-600',
+    },
+    {
+      label: 'Resolved',
+      value: String(messages.filter((item) => item.status === 'Resolved').length),
+      tone: 'text-emerald-600',
+    },
+    {
+      label: 'Total Messages',
+      value: String(messages.length),
+      tone: 'text-blue-600',
+    },
+  ];
+
+  return (
+    <AdminSidebar>
+      <ToastContainer toasts={toasts} onRemove={remove} />
+      <div className="flex flex-col gap-6 animate-fade-in">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold">Contact Us Report</h1>
+            <p className="text-sm text-[var(--muted-foreground)]">Customer support conversations and message health</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {summaryCards.map((item) => (
+            <div key={item.label} className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-4">
+              <div className={`text-3xl font-bold ${item.tone}`}>{item.value}</div>
+              <div className="text-xs uppercase tracking-[0.12em] text-[var(--muted-foreground)] mt-1">{item.label}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
+          <DataTable
+            data={messages as any}
+            columns={[
+              { key: 'customer', label: 'Customer', render: (row: any) => <span className="font-medium">{row.customer}</span> },
+              { key: 'subject', label: 'Subject' },
+              { key: 'channel', label: 'Channel' },
+              { key: 'status', label: 'Status', render: (row: any) => <Badge variant={row.status === 'Resolved' ? 'success' : row.status === 'Pending' ? 'warning' : row.status === 'New' ? 'info' : 'default'}>{row.status}</Badge> },
+              { key: 'sentiment', label: 'Sentiment' },
+              { key: 'lastReply', label: 'Last Reply' },
+              { key: 'actions', label: 'Reply', sortable: false, render: (row: any) => (
+                <Button size="sm" variant="outline" onClick={() => openReply(row)}>Reply</Button>
+              ) },
+            ]}
+          />
+        </div>
+      </div>
+
+      <Modal open={replyOpen} onClose={() => setReplyOpen(false)} title={`Reply to ${selectedInquiry?.customer ?? 'customer'}`} size="lg">
+        <div className="flex flex-col gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Input label="To" value={selectedInquiry?.email ?? ''} readOnly />
+            <Input label="Subject" value={selectedInquiry ? `Re: ${selectedInquiry.subject}` : ''} readOnly />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium">Email response</label>
+            <textarea
+              value={replyText}
+              onChange={(e) => setReplyText(e.target.value)}
+              rows={10}
+              className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+            />
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button variant="outline" onClick={() => setReplyOpen(false)}>Cancel</Button>
+            <Button onClick={sendReply}>Send Reply</Button>
+          </div>
+        </div>
+      </Modal>
     </AdminSidebar>
   );
 }

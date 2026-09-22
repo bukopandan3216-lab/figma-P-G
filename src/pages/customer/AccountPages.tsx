@@ -44,7 +44,7 @@ export function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[var(--background)] flex">
+    <div className="min-h-screen bg-[#FAF9F7] flex">
       <div className="hidden lg:block flex-1 bg-gradient-to-br from-[#2C1810] to-[#4A2030] relative overflow-hidden">
         <div className="absolute inset-0 opacity-30" style={{ backgroundImage: 'radial-gradient(circle at 40% 60%, #B5697A 0%, transparent 60%)' }} />
         <img src="https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=800&h=1200&fit=crop&auto=format" alt="" className="absolute inset-0 w-full h-full object-cover mix-blend-overlay opacity-40" />
@@ -84,11 +84,11 @@ export function LoginPage() {
                 <button type="button" onClick={() => setShowPw(s => !s)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]">{showPw ? <EyeOff size={15} /> : <Eye size={15} />}</button>
               </div>
             </div>
-            <div className="flex justify-end"><Link to="/forgot-password" className="text-xs text-[var(--primary)] hover:underline">Forgot password?</Link></div>
+            <div className="flex justify-end"><Link to="/forgot-password" className="text-xs text-[#B5697A] hover:underline">Forgot password?</Link></div>
             <Button type="submit" size="lg" className="w-full" loading={loading}>Sign In</Button>
             <div className="relative flex items-center gap-3 py-1">
-              <div className="h-px flex-1 bg-[var(--border)]" />
-              <span className="text-xs text-[var(--muted-foreground)]">or continue with</span>
+              <div className="h-px flex-1 bg-border" />
+              <span className="text-xs text-[#78716C]">or continue with</span>
               <div className="h-px flex-1 bg-[var(--border)]" />
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -139,7 +139,7 @@ export function RegisterPage() {
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, [k]: e.target.value }));
 
   return (
-    <div className="min-h-screen bg-[var(--background)] flex items-center justify-center p-6">
+    <div className="min-h-screen bg-[#FAF9F7] flex items-center justify-center p-6">
       <div className="w-full max-w-md">
         <div className="flex items-center gap-2 mb-8">
           <div className="w-7 h-7 rounded-full bg-[var(--primary)] flex items-center justify-center"><Sparkles size={14} className="text-white" /></div>
@@ -288,9 +288,19 @@ function ProfileSection({ user, updateUser, addToast }: any) {
   const [form, setForm] = useState({ firstName: user?.firstName || '', lastName: user?.lastName || '', email: user?.email || '', phone: user?.phone || '', birthday: user?.birthday || '' });
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, [k]: e.target.value }));
 
-  const save = () => {
-    updateUser({ firstName: form.firstName, lastName: form.lastName, phone: form.phone, birthday: form.birthday, initials: `${form.firstName[0]}${form.lastName[0]}`.toUpperCase() });
-    addToast('success', 'Profile updated successfully!');
+  const save = async () => {
+    try {
+      await updateUser({
+        firstName: form.firstName,
+        lastName: form.lastName,
+        phone: form.phone,
+        birthday: form.birthday,
+        initials: `${(form.firstName || 'U')[0]}${(form.lastName || 'U')[0]}`.toUpperCase(),
+      });
+      addToast('success', 'Profile updated successfully!');
+    } catch (error) {
+      addToast('error', error instanceof Error ? error.message : 'Profile update failed.');
+    }
   };
 
   return (
@@ -408,7 +418,7 @@ function WishlistSection() {
               <div className="text-sm font-semibold line-clamp-2 mb-2 leading-snug">{p.name}</div>
               <div className="flex items-center justify-between">
                 <span className="font-bold text-sm">${p.price.toFixed(2)}</span>
-                <Button size="sm" onClick={() => addToCart({ id: p.id, name: p.name, brand: p.brand, price: p.price, image: p.image })} disabled={!p.inStock} className="text-xs">Add</Button>
+                <Button size="sm" onClick={() => addToCart({ id: p.id, name: p.name, brand: p.brand, price: p.price, image: p.image, stock: p.stock, inStock: p.inStock })} disabled={!p.inStock} className="text-xs">Add</Button>
               </div>
             </div>
           </div>
@@ -421,14 +431,32 @@ function WishlistSection() {
 // ─── Addresses Section ────────────────────────────────────────────────────────
 interface Address { id: string; label: string; name: string; line1: string; city: string; zip: string; phone: string; isDefault: boolean; }
 
+function readStoredAddresses(): Address[] {
+  try {
+    const raw = localStorage.getItem('pgbeauty-addresses');
+    return raw ? JSON.parse(raw) as Address[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistAddresses(addresses: Address[]) {
+  try {
+    localStorage.setItem('pgbeauty-addresses', JSON.stringify(addresses));
+  } catch {
+    // Ignore storage quota issues.
+  }
+}
+
 function AddressesSection({ addToast }: any) {
-  const [addresses, setAddresses] = useState<Address[]>([
-    { id: 'a1', label: 'Home', name: 'Maria Santos', line1: '123 Rizal Street, Barangay San Antonio', city: 'Makati City, Metro Manila', zip: '1220', phone: '+63 912 345 6789', isDefault: true },
-    { id: 'a2', label: 'Office', name: 'Maria Santos', line1: '456 Ayala Avenue, Salcedo Village', city: 'Makati City, Metro Manila', zip: '1227', phone: '+63 912 345 6789', isDefault: false },
-  ]);
+  const [addresses, setAddresses] = useState<Address[]>(() => readStoredAddresses());
   const [modalOpen, setModalOpen] = useState(false);
   const [editAddr, setEditAddr] = useState<Address | null>(null);
   const [form, setForm] = useState({ label: 'Home', name: '', line1: '', city: '', zip: '', phone: '' });
+
+  useEffect(() => {
+    persistAddresses(addresses);
+  }, [addresses]);
 
   const openAdd = () => { setEditAddr(null); setForm({ label: 'Home', name: '', line1: '', city: '', zip: '', phone: '' }); setModalOpen(true); };
   const openEdit = (a: Address) => { setEditAddr(a); setForm({ label: a.label, name: a.name, line1: a.line1, city: a.city, zip: a.zip, phone: a.phone }); setModalOpen(true); };
@@ -520,14 +548,32 @@ interface PaymentMethod {
   isDefault: boolean;
 }
 
+function readStoredPaymentMethods(): PaymentMethod[] {
+  try {
+    const raw = localStorage.getItem('pgbeauty-payment-methods');
+    return raw ? JSON.parse(raw) as PaymentMethod[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistPaymentMethods(methods: PaymentMethod[]) {
+  try {
+    localStorage.setItem('pgbeauty-payment-methods', JSON.stringify(methods));
+  } catch {
+    // Ignore storage quota issues.
+  }
+}
+
 function PaymentSection({ addToast }: any) {
-  const [methods, setMethods] = useState<PaymentMethod[]>([
-    { id: 'pm1', type: 'credit', label: 'Visa ending in 4242', detail: 'Expires 08/28', isDefault: true },
-    { id: 'pm2', type: 'gcash', label: 'GCash', detail: '+63 912 345 6789', isDefault: false },
-  ]);
+  const [methods, setMethods] = useState<PaymentMethod[]>(() => readStoredPaymentMethods());
   const [modalOpen, setModalOpen] = useState(false);
   const [addType, setAddType] = useState<PaymentType>('gcash');
   const [form, setForm] = useState({ phone: '', cardName: '', cardNumber: '', expiry: '', cvv: '' });
+
+  useEffect(() => {
+    persistPaymentMethods(methods);
+  }, [methods]);
 
   const paymentIcons: Record<PaymentType, string> = {
     gcash: '💙', paymaya: '💚', credit: '💳', debit: '🏧'
@@ -667,7 +713,7 @@ export function WishlistPage() {
                   <Link to={`/product/${p.id}`} className="text-sm font-semibold line-clamp-2 hover:text-[var(--primary)] transition-colors">{p.name}</Link>
                   <div className="flex items-center justify-between mt-2">
                     <span className="font-bold text-sm">${p.price.toFixed(2)}</span>
-                    <Button size="sm" onClick={() => addToCart({ id: p.id, name: p.name, brand: p.brand, price: p.price, image: p.image })} disabled={!p.inStock} className="text-xs">Add to Cart</Button>
+                    <Button size="sm" onClick={() => addToCart({ id: p.id, name: p.name, brand: p.brand, price: p.price, image: p.image, stock: p.stock, inStock: p.inStock })} disabled={!p.inStock} className="text-xs">Add to Cart</Button>
                   </div>
                 </div>
               </div>

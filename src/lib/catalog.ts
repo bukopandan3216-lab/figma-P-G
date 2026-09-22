@@ -59,29 +59,34 @@ export async function fetchProducts(): Promise<Product[]> {
   const { data, error } = await supabase
     .from('products')
     .select('*, brands(name), categories(name), product_variants(id, size, scent, inventory(stock_quantity))')
-    .eq('status', 'Active')
     .order('created_at', { ascending: false });
   if (error) throw error;
 
-  return ((data || []) as ProductRow[]).map(row => ({
-    id: row.id,
-    name: row.name,
-    price: Number(row.price),
-    originalPrice: row.original_price == null ? undefined : Number(row.original_price),
-    rating: Number(row.rating),
-    reviews: row.reviews,
-    image: row.image,
-    images: row.images,
-    description: row.description,
-    tags: row.tags,
-    badge: row.badge || undefined,
-    brand: row.brands?.name || row.brand || '',
-    category: row.categories?.name || row.category || '',
-    variants: buildVariantGroups(row.product_variants) || row.variants,
-    variantId: row.product_variants?.[0]?.id,
-    stock: Number(row.product_variants?.reduce((sum, variant) => sum + Number(toOne(variant.inventory)?.stock_quantity || 0), 0) || 0),
-    inStock: Number(row.product_variants?.reduce((sum, variant) => sum + Number(toOne(variant.inventory)?.stock_quantity || 0), 0) || 0) > 0,
-  }));
+  return ((data || []) as ProductRow[]).map(row => {
+    const normalizedImages = (Array.isArray(row.images) ? row.images : []).filter((url): url is string => typeof url === 'string' && url.trim() !== '');
+    const primaryImage = (typeof row.image === 'string' && row.image.trim() !== '') ? row.image : normalizedImages[0] || '';
+    const totalStock = Number(row.product_variants?.reduce((sum, variant) => sum + Number(toOne(variant.inventory)?.stock_quantity || 0), 0) || 0);
+
+    return {
+      id: row.id,
+      name: row.name,
+      price: Number(row.price),
+      originalPrice: row.original_price == null ? undefined : Number(row.original_price),
+      rating: Number(row.rating),
+      reviews: row.reviews,
+      image: primaryImage,
+      images: normalizedImages.length ? normalizedImages : primaryImage ? [primaryImage] : [],
+      description: row.description,
+      tags: row.tags,
+      badge: row.badge || undefined,
+      brand: row.brands?.name || row.brand || '',
+      category: row.categories?.name || row.category || '',
+      variants: buildVariantGroups(row.product_variants) || row.variants,
+      variantId: row.product_variants?.[0]?.id,
+      stock: totalStock,
+      inStock: totalStock > 0 && row.status !== 'Archived',
+    };
+  });
 }
 
 export async function fetchCategories(): Promise<CatalogCategory[]> {
@@ -111,18 +116,38 @@ export async function createOrder(input: {
   const tax = subtotal * 0.12;
   const total = subtotal + shippingFee + tax;
 
+  const variantIds = input.items.map(item => item.variant).filter((value): value is string => Boolean(value));
   const { data: variants, error: variantError } = await supabase
     .from('product_variants')
     .select('id, product_id')
     .in('product_id', input.items.map(item => item.productId));
   if (variantError) throw variantError;
-  const variantByProduct = new Map((variants || []).map(variant => [variant.product_id, variant.id]));
+
+  const fallbackVariantByProduct = new Map((variants || []).map(variant => [variant.product_id, variant.id]));
+  const requestedVariantIds = input.items.map(item => item.variant ?? fallbackVariantByProduct.get(item.productId)).filter((value): value is string => Boolean(value));
+
+  const { data: inventoryRows, error: inventoryError } = await supabase
+    .from('inventory')
+    .select('variant_id, stock_quantity')
+    .in('variant_id', requestedVariantIds);
+  if (inventoryError) throw inventoryError;
+
+  const inventoryMap = new Map((inventoryRows || []).map(row => [row.variant_id, Number(row.stock_quantity || 0)]));
+
+  for (const item of input.items) {
+    const variantId = item.variant ?? fallbackVariantByProduct.get(item.productId);
+    if (!variantId) throw new Error('One or more products are not configured with a sellable variant.');
+    const available = inventoryMap.get(variantId) ?? 0;
+    if (available < item.quantity) {
+      throw new Error(`Only ${available} unit(s) remain for one of the selected products.`);
+    }
+  }
+
   const rpcItems = input.items.map(item => ({
-    variant_id: variantByProduct.get(item.productId),
+    variant_id: item.variant ?? fallbackVariantByProduct.get(item.productId),
     quantity: item.quantity,
     price_at_purchase: item.unitPrice,
   }));
-  if (rpcItems.some(item => !item.variant_id)) throw new Error('One or more products are not configured with a sellable variant.');
 
   const { data: order, error } = await supabase.rpc('place_order', {
     p_user_id: input.customerId,
@@ -141,5 +166,10 @@ export async function createOrder(input: {
     p_shipping_country: input.shipping.country,
   });
   if (error) throw error;
-  return order;
+
+  const normalized = Array.isArray(order) ? order[0] : order;
+  return {
+    ...normalized,
+    order_number: normalized?.order_no || normalized?.order_number || normalized?.id || 'N/A',
+  };
 }

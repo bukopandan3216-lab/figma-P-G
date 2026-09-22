@@ -164,4 +164,15 @@ begin
 end;
 $$;
 
+create policy own_order_payment_insert on public.payments for insert with check (
+  exists (select 1 from public.orders o where o.id = order_id and o.user_id = auth.uid())
+);
+create policy own_order_movement_insert on public.inventory_movements for insert with check (
+  auth.uid() is not null and order_id is not null and exists (
+    select 1 from public.orders o where o.id = order_id and o.user_id = auth.uid()
+  )
+);
+create policy authenticated_inventory_update on public.inventory for update using (auth.uid() is not null) with check (auth.uid() is not null);
+create policy authenticated_inventory_insert on public.inventory for insert with check (auth.uid() is not null);
+
 commit;

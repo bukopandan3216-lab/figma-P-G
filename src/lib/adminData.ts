@@ -1,15 +1,66 @@
 import { supabase } from './supabase';
 
 export async function fetchSuppliers() {
-  const { data, error } = await supabase.from('suppliers').select('*, supplier_products(product_id), purchase_orders(id, created_at)').order('created_at', { ascending: false });
+  const { data, error } = await supabase
+    .from('suppliers')
+    .select('id, name, contact_email, phone, address, created_at, supplier_products(product_id), purchase_orders(id, po_no, status, created_at)')
+    .order('created_at', { ascending: false });
+
   if (error) throw error;
-  return (data || []).map((row: any) => ({ id: row.id, name: row.name, contact: row.contact_email || '', email: row.contact_email || '', phone: row.phone || '', products: row.supplier_products?.length || 0, status: 'Active', lastOrder: row.purchase_orders?.[0]?.created_at ? new Date(row.purchase_orders[0].created_at).toLocaleDateString() : 'N/A', purchaseOrders: (row.purchase_orders || []).map((purchase: any) => ({ po: purchase.id, date: new Date(purchase.created_at).toLocaleDateString(), amount: 'See order total', status: purchase.status, items: 0 })) }));
+
+  return (data || []).map((row: any) => {
+    const uniqueProductIds = new Set((row.supplier_products || []).map((entry: any) => entry.product_id).filter(Boolean));
+    const purchaseOrders = (row.purchase_orders || [])
+      .slice()
+      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .map((purchase: any) => ({
+        po: purchase.po_no || purchase.id,
+        date: purchase.created_at ? new Date(purchase.created_at).toLocaleDateString() : 'N/A',
+        amount: 'See order total',
+        status: purchase.status,
+        items: 0,
+      }));
+
+    return {
+      id: row.id,
+      name: row.name,
+      contact: row.contact_email || row.phone || 'N/A',
+      email: row.contact_email || '',
+      phone: row.phone || '',
+      products: uniqueProductIds.size,
+      status: 'Active',
+      lastOrder: purchaseOrders[0]?.date || 'N/A',
+      purchaseOrders,
+    };
+  });
 }
 
 export async function fetchPurchases() {
-  const { data, error } = await supabase.from('purchase_orders').select('id, po_no, created_by, created_at, total_cost, status, suppliers(name), profiles(full_name, email), purchase_order_items(quantity)').order('created_at', { ascending: false });
+  const { data, error } = await supabase
+    .from('orders')
+    .select('id, order_no, created_at, total_amount, status, payment_method, profiles(full_name, email), order_items(quantity, price_at_purchase, product_variants(products(name)))')
+    .order('created_at', { ascending: false });
+
   if (error) throw error;
-  return (data || []).map((row: any) => ({ id: row.po_no || row.id, createdBy: row.profiles?.full_name || row.profiles?.email || 'System', supplier: row.suppliers?.name || 'Unassigned', date: new Date(row.created_at).toLocaleDateString(), items: (row.purchase_order_items || []).reduce((sum: number, item: any) => sum + item.quantity, 0), total: `₱${Number(row.total_cost || 0).toFixed(2)}`, status: row.status }));
+
+  return (data || []).map((row: any) => {
+    const itemCount = (row.order_items || []).reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0);
+    const productNames = (row.order_items || [])
+      .map((item: any) => item.product_variants?.products?.name)
+      .filter((name: string | undefined) => Boolean(name));
+
+    return {
+      id: row.order_no || row.id,
+      createdBy: row.profiles?.full_name || row.profiles?.email || 'Customer',
+      supplier: productNames.length ? productNames.join(', ') : 'Order items',
+      date: row.created_at ? new Date(row.created_at).toLocaleDateString() : 'N/A',
+      items: itemCount,
+      total: `₱${Number(row.total_amount || 0).toFixed(2)}`,
+      status: row.status,
+      paymentMethod: row.payment_method,
+      productSummary: productNames.length ? productNames.slice(0, 2).join(', ') + (productNames.length > 2 ? ' + more' : '') : 'No items listed',
+    };
+  });
 }
 
 export async function fetchCustomers() {

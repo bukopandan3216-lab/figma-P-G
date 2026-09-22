@@ -84,7 +84,7 @@ export default function ForYouPage() {
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-2xl font-bold">${topPick.price.toFixed(2)}</span>
-                <Button onClick={() => addToCart({ id: topPick.id, name: topPick.name, brand: topPick.brand, price: topPick.price, image: topPick.image })}>Add to Cart</Button>
+                <Button onClick={() => addToCart({ id: topPick.id, name: topPick.name, brand: topPick.brand, price: topPick.price, image: topPick.image, stock: topPick.stock, inStock: topPick.inStock })}>Add to Cart</Button>
                 <Link to={`/product/${topPick.id}`}><Button variant="outline">View Details</Button></Link>
               </div>
             </div>
@@ -109,7 +109,7 @@ export default function ForYouPage() {
                   </div>
                   <div className="flex items-center justify-between mt-2">
                     <span className="text-sm font-bold">${product.price.toFixed(2)}</span>
-                    <Button size="sm" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image })} disabled={!product.inStock} className="text-xs px-2.5">Add</Button>
+                    <Button size="sm" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })} disabled={!product.inStock} className="text-xs px-2.5">Add</Button>
                   </div>
                 </div>
               </div>

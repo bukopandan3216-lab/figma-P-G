@@ -6,6 +6,7 @@ import { useCatalog } from '../../context/CatalogContext';
 import { useCart } from '../../context/AppContext';
 import { Badge, Button, StarRating, Tabs, Breadcrumb } from '../../components/ui';
 import CustomerNav from '../../components/CustomerNav';
+import { safeImage } from '../../lib/image';
 
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -16,17 +17,18 @@ export default function ProductDetailPage() {
   const [tab, setTab] = useState('Description');
   const [qty, setQty] = useState(1);
   const { addToCart, wishlist, toggleWishlist } = useCart();
-  if (loading) return <div className="min-h-screen bg-[var(--background)] flex items-center justify-center text-sm text-[var(--muted-foreground)]">Loading product...</div>;
-  if (error || !product) return <div className="min-h-screen bg-[var(--background)] flex items-center justify-center p-6 text-center"><p className="text-sm text-[var(--muted-foreground)]">{error || 'Product not found.'}</p></div>;
+  if (loading) return <div className="min-h-screen bg-background flex items-center justify-center text-sm text-muted-foreground">Loading product...</div>;
+  if (error || !product) return <div className="min-h-screen bg-background flex items-center justify-center p-6 text-center"><p className="text-sm text-[var(--muted-foreground)]">{error || 'Product not found.'}</p></div>;
   const wished = wishlist.includes(product.id);
   // products.images defaults to '{}' (an empty array) in the DB, not null —
   // and [] is truthy in JS, so `product.images || [product.image]` never
   // fell back to the single image and rendered no src at all.
-  const imgs = product.images?.length ? product.images : [product.image];
+  const imgs = (product.images?.length ? product.images.filter(Boolean) : [product.image]).filter(Boolean);
+  const safeImgs = imgs.length ? imgs.map(img => safeImage(img, product.name)) : [safeImage(product.image, product.name)];
   const relatedProducts = products.filter(p => p.category === product.category && p.id !== product.id).slice(0, 4);
 
   return (
-    <div className="min-h-screen bg-[var(--background)]">
+    <div className="min-h-screen bg-background">
       <CustomerNav />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
         <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: product.category, href: `/category/${product.category.toLowerCase().replace(' ', '-')}` }, { label: product.name }]} />
@@ -34,20 +36,20 @@ export default function ProductDetailPage() {
         <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-10 lg:gap-16">
           {/* Image gallery */}
           <div className="flex flex-col gap-3">
-            <div className="relative aspect-square bg-[var(--secondary)] rounded-[var(--radius-xl)] overflow-hidden">
-              <img src={imgs[activeImg]} alt={product.name} className="w-full h-full object-cover" />
-              {imgs.length > 1 && (
+            <div className="relative aspect-square bg-secondary rounded-radius-xl overflow-hidden">
+              <img src={safeImgs[activeImg]} alt={product.name} className="w-full h-full object-cover" />
+              {safeImgs.length > 1 && (
                 <>
-                  <button onClick={() => setActiveImg(i => (i - 1 + imgs.length) % imgs.length)} className="absolute left-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-md hover:bg-white transition-colors"><ChevronLeft size={18} /></button>
-                  <button onClick={() => setActiveImg(i => (i + 1) % imgs.length)} className="absolute right-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-md hover:bg-white transition-colors"><ChevronRight size={18} /></button>
+                  <button onClick={() => setActiveImg(i => (i - 1 + safeImgs.length) % safeImgs.length)} className="absolute left-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-md hover:bg-white transition-colors"><ChevronLeft size={18} /></button>
+                  <button onClick={() => setActiveImg(i => (i + 1) % safeImgs.length)} className="absolute right-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-md hover:bg-white transition-colors"><ChevronRight size={18} /></button>
                 </>
               )}
               {product.badge && <div className="absolute top-4 left-4"><Badge variant="rose">{product.badge}</Badge></div>}
             </div>
-            {imgs.length > 1 && (
+            {safeImgs.length > 1 && (
               <div className="flex gap-2 overflow-x-auto scrollbar-hide">
-                {imgs.map((img, i) => (
-                  <button key={i} onClick={() => setActiveImg(i)} className={`flex-shrink-0 w-16 h-16 rounded-[var(--radius)] overflow-hidden border-2 transition-all ${i === activeImg ? 'border-[var(--primary)]' : 'border-transparent hover:border-[var(--muted)]'}`}>
+                {safeImgs.map((img, i) => (
+                  <button key={i} onClick={() => setActiveImg(i)} className={`shrink-0 w-16 h-16 rounded-radius overflow-hidden border-2 transition-all ${i === activeImg ? 'border-[var(--primary)]' : 'border-transparent hover:border-[var(--muted)]'}`}>
                     <img src={img} alt="" className="w-full h-full object-cover" />
                   </button>
                 ))}
@@ -111,9 +113,9 @@ export default function ProductDetailPage() {
               <Button
                 size="lg"
                 className="flex-1"
-                disabled={!product.inStock}
+                disabled={!product.inStock || qty > product.stock}
                 onClick={() => {
-                  for (let i = 0; i < qty; i++) addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image });
+                  for (let i = 0; i < qty; i++) addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock });
                 }}
               >
                 <ShoppingBag size={16} /> Add to Cart
@@ -225,7 +227,7 @@ export default function ProductDetailPage() {
           <div className="text-xs text-[var(--muted-foreground)] truncate">{product.name}</div>
           <div className="font-bold">${product.price.toFixed(2)}</div>
         </div>
-        <Button disabled={!product.inStock} onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image })}>
+        <Button disabled={!product.inStock || product.stock <= 0} onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })}>
           <ShoppingBag size={15} /> Add to Cart
         </Button>
       </div>

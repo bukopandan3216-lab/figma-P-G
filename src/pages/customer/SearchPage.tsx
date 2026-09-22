@@ -62,7 +62,7 @@ export default function SearchPage() {
                   </div>
                   <div className="flex items-center justify-between mt-2">
                     <span className="text-sm font-bold">${product.price.toFixed(2)}</span>
-                    <Button size="sm" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image })} disabled={!product.inStock} className="text-xs px-2.5 py-1">Add</Button>
+                    <Button size="sm" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })} disabled={!product.inStock} className="text-xs px-2.5 py-1">Add</Button>
                   </div>
                 </div>
               </div>

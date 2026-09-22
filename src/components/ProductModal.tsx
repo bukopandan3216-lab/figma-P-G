@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import type { Product } from '../data/products';
 import { useCatalog } from '../context/CatalogContext';
 import { Badge, StarRating, Button } from './ui';
+import { safeImage } from '../lib/image';
 
 interface Props {
   product: Product | null;
@@ -60,10 +61,8 @@ export default function ProductModal({ product, onClose }: Props) {
 
   if (!product) return null;
 
-  // products.images defaults to '{}' (an empty array) in the DB, not null —
-  // and [] is truthy in JS, so `product.images || [product.image]` never
-  // fell back to the single image and rendered no src at all.
-  const imgs = product.images?.length ? product.images : [product.image];
+  const imgs = (product.images?.length ? product.images.filter(Boolean) : [product.image]).filter(Boolean);
+  const safeImgs = imgs.length ? imgs.map(img => safeImage(img, product.name)) : [safeImage(product.image, product.name)];
   const wished = wishlist.includes(product.id);
   const totalReviews = ratingBreakdown.reduce((s, r) => s + r.count, 0);
 
@@ -90,7 +89,7 @@ export default function ProductModal({ product, onClose }: Props) {
               {/* Thumbnail strip */}
               {imgs.length > 1 && (
                 <div className="flex sm:flex-col gap-2 p-3 sm:p-3 overflow-x-auto sm:overflow-y-auto scrollbar-hide sm:w-20 flex-shrink-0">
-                  {imgs.map((img, i) => (
+                  {safeImgs.map((img, i) => (
                     <button
                       key={i}
                       onClick={() => setActiveImg(i)}
@@ -105,14 +104,14 @@ export default function ProductModal({ product, onClose }: Props) {
               {/* Main image */}
               <div className="relative flex-1 aspect-square sm:aspect-auto overflow-hidden">
                 <img
-                  src={imgs[activeImg]}
+                  src={safeImgs[activeImg]}
                   alt={product.name}
                   className="w-full h-full object-cover"
                 />
-                {imgs.length > 1 && (
+                {safeImgs.length > 1 && (
                   <div className="absolute bottom-3 right-3 flex gap-1">
-                    <button onClick={() => setActiveImg(i => (i - 1 + imgs.length) % imgs.length)} className="w-8 h-8 rounded-full bg-white/90 flex items-center justify-center shadow text-sm hover:bg-white transition-colors"><ChevronLeft size={16} /></button>
-                    <button onClick={() => setActiveImg(i => (i + 1) % imgs.length)} className="w-8 h-8 rounded-full bg-white/90 flex items-center justify-center shadow text-sm hover:bg-white transition-colors"><ChevronRight size={16} /></button>
+                    <button onClick={() => setActiveImg(i => (i - 1 + safeImgs.length) % safeImgs.length)} className="w-8 h-8 rounded-full bg-white/90 flex items-center justify-center shadow text-sm hover:bg-white transition-colors"><ChevronLeft size={16} /></button>
+                    <button onClick={() => setActiveImg(i => (i + 1) % safeImgs.length)} className="w-8 h-8 rounded-full bg-white/90 flex items-center justify-center shadow text-sm hover:bg-white transition-colors"><ChevronRight size={16} /></button>
                   </div>
                 )}
               </div>
@@ -153,14 +152,14 @@ export default function ProductModal({ product, onClose }: Props) {
               {/* Action buttons */}
               <div className="flex gap-2 mb-4">
                 <button
-                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image })}
+                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })}
                   disabled={!product.inStock}
                   className="flex-1 border-2 border-[var(--primary)] text-[var(--primary)] font-semibold rounded-[var(--radius)] py-2.5 text-sm hover:bg-[var(--rose-light)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   <ShoppingBag size={15} /> Add to Cart
                 </button>
                 <button
-                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image })}
+                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })}
                   disabled={!product.inStock}
                   className="flex-1 bg-[var(--primary)] text-white font-semibold rounded-[var(--radius)] py-2.5 text-sm hover:bg-[#9E5569] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >

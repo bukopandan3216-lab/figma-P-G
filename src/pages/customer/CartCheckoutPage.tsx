@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Trash2, ShoppingBag, Check, CreditCard, MapPin, Package } from 'lucide-react';
 import { useCart } from '../../context/AppContext';
@@ -8,6 +8,43 @@ import { useAuth } from '../../context/AuthContext';
 import { createOrder } from '../../lib/catalog';
 
 const STEPS = ['Shipping', 'Payment', 'Confirmation'];
+
+type SavedAddress = {
+  id: string;
+  label: string;
+  name: string;
+  line1: string;
+  city: string;
+  zip: string;
+  phone: string;
+  isDefault: boolean;
+};
+
+type SavedPaymentMethod = {
+  id: string;
+  type: 'gcash' | 'paymaya' | 'credit' | 'debit';
+  label: string;
+  detail: string;
+  isDefault: boolean;
+};
+
+function readStoredAddresses(): SavedAddress[] {
+  try {
+    const raw = localStorage.getItem('pgbeauty-addresses');
+    return raw ? (JSON.parse(raw) as SavedAddress[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function readStoredPaymentMethods(): SavedPaymentMethod[] {
+  try {
+    const raw = localStorage.getItem('pgbeauty-payment-methods');
+    return raw ? (JSON.parse(raw) as SavedPaymentMethod[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 export default function CartCheckoutPage() {
   const [view, setView] = useState<'cart' | 'checkout'>('cart');
@@ -21,6 +58,34 @@ export default function CartCheckoutPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [orderNumber, setOrderNumber] = useState('');
+
+  useEffect(() => {
+    const savedAddresses = readStoredAddresses();
+    const defaultAddress = savedAddresses.find(address => address.isDefault) ?? savedAddresses[0];
+    const customerName = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : defaultAddress?.name || '';
+
+    setShipping(prev => ({
+      ...prev,
+      name: customerName || prev.name || '',
+      email: user?.email || prev.email || '',
+      phone: user?.phone || defaultAddress?.phone || prev.phone || '',
+      address: defaultAddress?.line1 || prev.address || '',
+      city: defaultAddress?.city || prev.city || '',
+      zip: defaultAddress?.zip || prev.zip || '',
+      country: prev.country || 'Philippines',
+    }));
+
+    const savedMethods = readStoredPaymentMethods();
+    const defaultMethod = savedMethods.find(method => method.isDefault) ?? savedMethods[0];
+    if (defaultMethod) {
+      const checkoutType: 'card' | 'cash_on_delivery' = defaultMethod.type === 'credit' || defaultMethod.type === 'debit' ? 'card' : 'cash_on_delivery';
+      setPaymentMethod(checkoutType);
+      setPayment(prev => ({
+        ...prev,
+        name: customerName || prev.name || '',
+      }));
+    }
+  }, [user?.id, user?.email, user?.phone, user?.firstName, user?.lastName]);
 
   const placeOrder = async () => {
     if (!user || cart.length === 0) return;
@@ -40,7 +105,7 @@ export default function CartCheckoutPage() {
         shipping,
         paymentMethod,
       });
-      setOrderNumber(order.order_number);
+      setOrderNumber(order.order_number || order.order_no || 'N/A');
       setStep(2);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to place order.');

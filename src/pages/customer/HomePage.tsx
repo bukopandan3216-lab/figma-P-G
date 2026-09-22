@@ -13,11 +13,11 @@ function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Pr
   const wished = wishlist.includes(product.id);
 
   return (
-    <div className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300">
+    <div className="group bg-white rounded-xl border border-border overflow-hidden hover:shadow-lg transition-all duration-300">
       <div
         role="button"
         tabIndex={0}
-        className="block w-full text-left relative aspect-square overflow-hidden bg-[var(--secondary)]"
+        className="block w-full text-left relative aspect-square overflow-hidden bg--secondary"
         onClick={() => onExpand(product)}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onExpand(product); } }}
       >
@@ -29,7 +29,7 @@ function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Pr
         )}
         {!product.inStock && (
           <div className="absolute inset-0 bg-white/70 flex items-center justify-center">
-            <span className="text-sm font-medium text-[var(--muted-foreground)]">Out of Stock</span>
+            <span className="text-sm font-medium text-muted-foreground">Out of Stock</span>
           </div>
         )}
         <button
@@ -42,20 +42,20 @@ function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Pr
         </button>
       </div>
       <div className="p-4">
-        <div className="text-xs text-[var(--muted-foreground)] mb-1 font-medium">{product.brand}</div>
-        <button onClick={() => onExpand(product)} className="text-sm font-semibold text-[var(--foreground)] line-clamp-2 hover:text-[var(--primary)] transition-colors leading-snug text-left w-full">{product.name}</button>
+        <div className="text-xs text-muted-foreground mb-1 font-medium">{product.brand}</div>
+        <button onClick={() => onExpand(product)} className="text-sm font-semibold text-foreground line-clamp-2 hover:text-primary transition-colors leading-snug text-left w-full">{product.name}</button>
         <div className="flex items-center gap-1.5 mt-1.5">
           <StarRating rating={product.rating} />
-          <span className="text-xs text-[var(--muted-foreground)]">({product.reviews.toLocaleString()})</span>
+          <span className="text-xs text-muted-foreground">({product.reviews.toLocaleString()})</span>
         </div>
         <div className="flex items-center justify-between mt-3">
           <div className="flex items-center gap-2">
-            <span className="text-base font-bold text-[var(--foreground)]">${product.price.toFixed(2)}</span>
-            {product.originalPrice && <span className="text-xs text-[var(--muted-foreground)] line-through">${product.originalPrice.toFixed(2)}</span>}
+            <span className="text-base font-bold text-foreground">${product.price.toFixed(2)}</span>
+            {product.originalPrice && <span className="text-xs text-muted-foreground line-through">${product.originalPrice.toFixed(2)}</span>}
           </div>
           <Button
             size="sm"
-            onClick={e => { addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image }); }}
+            onClick={e => { addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock }); }}
             disabled={!product.inStock}
           >
             Add
@@ -79,16 +79,16 @@ export default function HomePage() {
     return () => window.removeEventListener('open-product-modal', handler as EventListener);
   }, []);
 
-  if (loading) return <div className="min-h-screen bg-[var(--background)] flex items-center justify-center text-sm text-[var(--muted-foreground)]">Loading catalog...</div>;
-  if (error) return <div className="min-h-screen bg-[var(--background)] flex items-center justify-center p-6 text-center"><div><h1 className="font-display text-2xl mb-2">Catalog unavailable</h1><p className="text-sm text-[var(--muted-foreground)]">{error}</p></div></div>;
+  if (loading) return <div className="min-h-screen bg--background flex items-center justify-center text-sm text-muted-foreground">Loading catalog...</div>;
+  if (error) return <div className="min-h-screen bg--background flex items-center justify-center p-6 text-center"><div><h1 className="font-display text-2xl mb-2">Catalog unavailable</h1><p className="text-sm text-muted-foreground">{error}</p></div></div>;
 
   return (
-    <div className="min-h-screen bg-[var(--background)]">
+    <div className="min-h-screen bg-background">
       <CustomerNav />
       <ProductModal product={modalProduct} onClose={() => setModalProduct(null)} />
 
       {/* Hero */}
-      <section className="relative overflow-hidden bg-gradient-to-br from-[#2C1810] via-[#4A2030] to-[#1B1530]">
+      <section className="relative overflow-hidden bg-linear-to-br from-[#2C1810] via-[#4A2030] to-[#1B1530]">
         <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(circle at 30% 50%, #B5697A 0%, transparent 60%), radial-gradient(circle at 80% 30%, #D4A5B5 0%, transparent 50%)' }} />
         <div className="relative max-w-7xl mx-auto px-4 sm:px-6 py-20 md:py-32 flex flex-col md:flex-row items-center gap-12">
           <div className="flex-1 text-white">
@@ -104,7 +104,7 @@ export default function HomePage() {
             </p>
             <div className="flex flex-wrap gap-3">
               <Link to="/quiz">
-                <Button size="lg" className="bg-[var(--primary)] hover:bg-[#9E5569]">Take Beauty Quiz <ArrowRight size={16} /></Button>
+                <Button size="lg" className="bg-primary hover:bg-[#9E5569]">Take Beauty Quiz <ArrowRight size={16} /></Button>
               </Link>
               <Link to="/for-you">
                 <Button size="lg" variant="outline" className="border-white/30 text-white hover:bg-white/10">Shop For You</Button>
@@ -113,7 +113,7 @@ export default function HomePage() {
           </div>
           <div className="flex-1 relative flex justify-center">
             <div className="relative w-72 h-72 md:w-96 md:h-96">
-              <div className="absolute inset-0 rounded-full bg-[var(--primary)]/20 blur-3xl" />
+              <div className="absolute inset-0 rounded-full bg-primary/20 blur-3xl" />
               <img
                 src="https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=500&h=500&fit=crop&auto=format"
                 alt="Beauty products"
@@ -121,12 +121,12 @@ export default function HomePage() {
               />
               <div className="absolute -bottom-4 -left-4 z-20 bg-white/95 backdrop-blur-sm rounded-2xl p-3 shadow-xl">
                 <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-[var(--rose-light)] flex items-center justify-center">
-                    <Zap size={14} className="text-[var(--primary)]" />
+                  <div className="w-8 h-8 rounded-full bg-rose-light flex items-center justify-center">
+                    <Zap size={14} className="text-primary" />
                   </div>
                   <div>
-                    <div className="text-xs font-bold text-[var(--foreground)]">AI Match</div>
-                    <div className="text-[10px] text-[var(--muted-foreground)]">98% for your skin</div>
+                    <div className="text-xs font-bold text-foreground">AI Match</div>
+                    <div className="text-[10px] text-muted-foreground">98% for your skin</div>
                   </div>
                 </div>
               </div>
@@ -136,7 +136,7 @@ export default function HomePage() {
       </section>
 
       {/* Trust bar */}
-      <div className="border-y border-[var(--border)] bg-white">
+      <div className="border-y border-border bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
             { icon: <Truck size={16} />, label: 'Free Shipping', sub: 'On orders over $35' },
@@ -145,10 +145,10 @@ export default function HomePage() {
             { icon: <Zap size={16} />, label: 'Fast Delivery', sub: '2–5 business days' },
           ].map(item => (
             <div key={item.label} className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-[var(--rose-light)] text-[var(--primary)] flex items-center justify-center flex-shrink-0">{item.icon}</div>
+              <div className="w-8 h-8 rounded-full bg-rose-light text-primary flex items-center justify-center shrink-0">{item.icon}</div>
               <div>
-                <div className="text-xs font-semibold text-[var(--foreground)]">{item.label}</div>
-                <div className="text-[11px] text-[var(--muted-foreground)]">{item.sub}</div>
+                <div className="text-xs font-semibold text-foreground">{item.label}</div>
+                <div className="text-[11px] text-muted-foreground">{item.sub}</div>
               </div>
             </div>
           ))}
@@ -159,16 +159,16 @@ export default function HomePage() {
       <section className="max-w-7xl mx-auto px-4 sm:px-6 py-14">
         <div className="flex items-end justify-between mb-8">
           <div>
-            <div className="text-xs font-medium text-[var(--primary)] tracking-widest uppercase mb-2">Shop By</div>
+            <div className="text-xs font-medium text-primary tracking-widest uppercase mb-2">Shop By</div>
             <h2 className="font-display text-3xl">Category</h2>
           </div>
-          <Link to="/category/all" className="text-sm text-[var(--muted-foreground)] hover:text-[var(--primary)] flex items-center gap-1 transition-colors">View all <ArrowRight size={14} /></Link>
+          <Link to="/category/all" className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 transition-colors">View all <ArrowRight size={14} /></Link>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {categories.map(cat => (
-            <Link key={cat.id} to={`/category/${cat.id}`} className="group relative overflow-hidden rounded-[var(--radius-xl)] aspect-[3/4] bg-[var(--secondary)] block">
+            <Link key={cat.id} to={`/category/${cat.id}`} className="group relative overflow-hidden rounded-xl aspect-3/4 bg-secondary block">
               <img src={cat.image} alt={cat.name} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-              <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
+              <div className="absolute inset-0 bg-linear-to-t from-black/70 via-black/20 to-transparent" />
               <div className="absolute bottom-0 left-0 right-0 p-4">
                 <h3 className="text-white font-semibold text-sm">{cat.name}</h3>
                 <p className="text-white/70 text-xs">{cat.count} products</p>
@@ -179,11 +179,11 @@ export default function HomePage() {
       </section>
 
       {/* Trending */}
-      <section className="bg-[var(--rose-light)]/40 py-14">
+      <section className="bg-rose-light/40 py-14">
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
           <div className="flex items-end justify-between mb-8">
             <div>
-              <div className="text-xs font-medium text-[var(--primary)] tracking-widest uppercase mb-2">Don't Miss Out</div>
+              <div className="text-xs font-medium text-primary tracking-widest uppercase mb-2">Don't Miss Out</div>
               <h2 className="font-display text-3xl">Trending & Almost Sold Out</h2>
             </div>
           </div>
@@ -195,13 +195,13 @@ export default function HomePage() {
 
       {/* Quiz CTA */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 py-14">
-        <div className="rounded-[var(--radius-xl)] bg-gradient-to-r from-[var(--primary)] to-[#8B4A5B] p-8 md:p-12 flex flex-col md:flex-row items-center justify-between gap-8">
+        <div className="rounded-xl bg-linear-to-r from-primary to-[#8B4A5B] p-8 md:p-12 flex flex-col md:flex-row items-center justify-between gap-8">
           <div className="text-white">
             <h2 className="font-display text-3xl md:text-4xl mb-3">Find Your Perfect Match</h2>
             <p className="text-white/80 max-w-md">Take our 2-minute beauty quiz and let our AI engine recommend products perfectly suited to your skin type and concerns.</p>
           </div>
-          <Link to="/quiz" className="flex-shrink-0">
-            <Button size="lg" className="bg-white text-[var(--primary)] hover:bg-[var(--rose-light)]">
+          <Link to="/quiz" className="shrink-0">
+            <Button size="lg" className="bg-white text-primary hover:bg-rose-light">
               Start Quiz <ArrowRight size={16} />
             </Button>
           </Link>
@@ -212,10 +212,10 @@ export default function HomePage() {
       <section className="max-w-7xl mx-auto px-4 sm:px-6 pb-14">
         <div className="flex items-end justify-between mb-8">
           <div>
-            <div className="text-xs font-medium text-[var(--primary)] tracking-widest uppercase mb-2">Personalized</div>
+            <div className="text-xs font-medium text-primary tracking-widest uppercase mb-2">Personalized</div>
             <h2 className="font-display text-3xl">Recommended For You</h2>
           </div>
-          <Link to="/for-you" className="text-sm text-[var(--muted-foreground)] hover:text-[var(--primary)] flex items-center gap-1 transition-colors">See all <ArrowRight size={14} /></Link>
+          <Link to="/for-you" className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 transition-colors">See all <ArrowRight size={14} /></Link>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           {recommended.map(p => <ProductCard key={p.id} product={p} onExpand={setModalProduct} />)}
@@ -223,7 +223,7 @@ export default function HomePage() {
       </section>
 
       {/* Footer */}
-      <footer className="border-t border-[var(--border)] bg-white py-10">
+      <footer className="border-t border-border bg-white py-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 grid grid-cols-2 md:grid-cols-4 gap-8 text-sm">
           {[
             { title: 'Shop', links: ['Skin Care', 'Hair Care', 'Body Care', 'Personal Care'] },
@@ -232,19 +232,19 @@ export default function HomePage() {
             { title: 'Company', links: ['About P&G', 'Sustainability', 'Careers', 'Press'] },
           ].map(col => (
             <div key={col.title}>
-              <div className="font-semibold text-[var(--foreground)] mb-3">{col.title}</div>
+              <div className="font-semibold text-foreground mb-3">{col.title}</div>
               <ul className="flex flex-col gap-2">
-                {col.links.map(l => <li key={l}><a href="#" className="text-[var(--muted-foreground)] hover:text-[var(--primary)] transition-colors">{l}</a></li>)}
+                {col.links.map(l => <li key={l}><a href="#" className="text-muted-foreground hover:text-primary transition-colors">{l}</a></li>)}
               </ul>
             </div>
           ))}
         </div>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 mt-8 pt-6 border-t border-[var(--border)] flex flex-col sm:flex-row items-center justify-between gap-2">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 mt-8 pt-6 border-t border-border flex flex-col sm:flex-row items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full bg-[var(--primary)] flex items-center justify-center"><Sparkles size={10} className="text-white" /></div>
-            <span className="text-sm font-display text-[var(--foreground)]">P&G Beauty</span>
+            <div className="w-6 h-6 rounded-full bg-primary flex items-center justify-center"><Sparkles size={10} className="text-white" /></div>
+            <span className="text-sm font-display text-foreground">P&G Beauty</span>
           </div>
-          <p className="text-xs text-[var(--muted-foreground)]">© 2026 Procter & Gamble. All rights reserved.</p>
+          <p className="text-xs text-muted-foreground">© 2026 Procter & Gamble. All rights reserved.</p>
         </div>
       </footer>
     </div>

@@ -12,7 +12,16 @@ import AdminSidebar from '../../components/AdminSidebar';
 // that combined total back onto just one variant, is what corrupted stock
 // levels every time Stock In/Out was used. Tracking variants directly fixes
 // that at the source.
+interface VariantStockRow {
+  inventoryId: string;
+  variantId: string;
+  variantLabel: string;
+  stock: number;
+  reorderLevel: number;
+}
+
 interface StockRow {
+  productId: string;
   inventoryId: string;
   variantId: string;
   product: string;
@@ -22,6 +31,8 @@ interface StockRow {
   stock: number;
   reorderLevel: number;
   image: string;
+  variantCount: number;
+  variantRows: VariantStockRow[];
 }
 interface Movement { id: string; movementNo: string; product: string; type: 'Stock In' | 'Stock Out'; qty: number; date: string; ref: string; }
 
@@ -47,36 +58,61 @@ export default function AdminInventory() {
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalType, setModalType] = useState<'in' | 'out'>('in');
+  const [selectedCategory, setSelectedCategory] = useState('All');
   const [form, setForm] = useState({ inventoryId: '', qty: '', ref: '', notes: '' });
   const { toasts, add: addToast, remove } = useToast();
 
   const loadInventory = async () => {
     setLoading(true);
     setError(null);
-    // Every product, every status (Draft/Archived stock still needs managing),
-    // exploded to one row per variant so each has its own real inventory id.
     const { data, error: fetchError } = await supabase
       .from('products')
-      .select('id, name, image, brands(name), categories(name), product_variants(id, size, scent, inventory(id, stock_quantity, reorder_level))')
+      .select('id, name, image, status, brands(name), categories(name), product_variants(id, size, scent, inventory(id, stock_quantity, reorder_level))')
       .order('name');
     if (fetchError) { setError(fetchError.message); setLoading(false); return; }
+
     const rows: StockRow[] = [];
     for (const p of (data || []) as any[]) {
-      for (const v of p.product_variants || []) {
+      const variantRows = (p.product_variants || []).filter((v: any) => {
         const inv = toOne<{ id: string; stock_quantity: number; reorder_level: number }>(v.inventory);
-        if (!inv) continue; // no inventory row configured for this variant yet
-        rows.push({
-          inventoryId: inv.id,
-          variantId: v.id,
-          product: p.name,
-          variantLabel: [v.size, v.scent].filter(Boolean).join(' / ') || 'Standard',
-          brand: p.brands?.name || '',
-          category: p.categories?.name || '',
-          stock: Number(inv.stock_quantity || 0),
-          reorderLevel: Number(inv.reorder_level || 10),
-          image: p.image,
-        });
-      }
+        return Boolean(inv);
+      });
+
+      const sumStock = variantRows.reduce((sum: number, v: any) => {
+        const inv = toOne<{ stock_quantity: number }>(v.inventory);
+        return sum + Number(inv?.stock_quantity || 0);
+      }, 0);
+
+      const maxReorder = variantRows.reduce((max: number, v: any) => {
+        const inv = toOne<{ reorder_level: number }>(v.inventory);
+        return Math.max(max, Number(inv?.reorder_level || 10));
+      }, 10);
+
+      if (!variantRows.length) continue;
+
+      rows.push({
+        productId: p.id,
+        inventoryId: variantRows[0].inventory?.id || variantRows[0].inventory?.[0]?.id || '',
+        variantId: variantRows[0].id,
+        product: p.name,
+        variantLabel: variantRows.length > 1 ? `${variantRows.length} variants` : [variantRows[0].size, variantRows[0].scent].filter(Boolean).join(' / ') || 'Standard',
+        brand: p.brands?.name || '',
+        category: p.categories?.name || '',
+        stock: sumStock,
+        reorderLevel: maxReorder,
+        image: p.image,
+        variantCount: variantRows.length,
+        variantRows: variantRows.map((v: any) => {
+          const inv = toOne<{ id: string; stock_quantity: number; reorder_level: number }>(v.inventory);
+          return {
+            inventoryId: inv?.id || '',
+            variantId: v.id,
+            variantLabel: [v.size, v.scent].filter(Boolean).join(' / ') || 'Standard',
+            stock: Number(inv?.stock_quantity || 0),
+            reorderLevel: Number(inv?.reorder_level || 10),
+          };
+        }),
+      });
     }
     setInventory(rows);
     setLoading(false);
@@ -88,6 +124,7 @@ export default function AdminInventory() {
       .select('id, movement_no, variant_id, movement_type, quantity, reference, created_at, product_variants(size, scent, products(name))')
       .order('created_at', { ascending: false })
       .limit(30);
+
     setMovements((data || []).map((row: any) => ({
       id: row.id,
       movementNo: row.movement_no || row.id.slice(0, 8),
@@ -106,6 +143,21 @@ export default function AdminInventory() {
     setForm({ inventoryId: '', qty: '', ref: '', notes: '' });
     setModalOpen(true);
   };
+
+  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm(p => ({ ...p, [k]: e.target.value }));
+
+  const categories = ['All', ...Array.from(new Set(inventory.map(item => item.category).filter(Boolean))).sort((a, b) => a.localeCompare(b))];
+  const categoryOptions = categories.filter(category => category !== 'All').map(category => ({
+    value: category,
+    label: category,
+  }));
+
+  const modalInventoryOptions = inventory
+    .filter(item => selectedCategory === 'All' || item.category === selectedCategory)
+    .map(item => ({
+      value: item.inventoryId,
+      label: `${item.category} · ${item.product} · ${item.variantLabel} (${item.stock} in stock)`,
+    }));
 
   const submit = () => {
     const qty = parseInt(form.qty);
@@ -132,10 +184,12 @@ export default function AdminInventory() {
     })();
   };
 
-  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm(p => ({ ...p, [k]: e.target.value }));
-
   const lowStockCount = inventory.filter(i => i.stock > 0 && i.stock < i.reorderLevel).length;
   const outCount = inventory.filter(i => i.stock === 0).length;
+  const inStockCount = inventory.filter(i => i.stock > 0 && i.stock >= i.reorderLevel).length;
+  const totalProducts = inventory.length;
+  const totalUnits = inventory.reduce((sum, item) => sum + item.stock, 0);
+  const filteredInventory = inventory.filter(item => selectedCategory === 'All' || item.category === selectedCategory);
 
   return (
     <AdminSidebar>
@@ -164,37 +218,66 @@ export default function AdminInventory() {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-4">
-          {[
-            { label: 'In Stock', count: inventory.filter(i => i.stock >= i.reorderLevel).length, color: 'text-emerald-600' },
-            { label: 'Low Stock', count: lowStockCount, color: 'text-amber-600' },
-            { label: 'Out of Stock', count: outCount, color: 'text-red-600' },
-          ].map(s => (
-            <div key={s.label} className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-4 text-center">
-              <div className={`text-3xl font-bold ${s.color}`}>{s.count}</div>
-              <div className="text-xs text-[var(--muted-foreground)] mt-1">{s.label}</div>
+        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 shadow-sm">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--muted-foreground)]">Inventory Summary</p>
+              <h2 className="mt-1 text-xl font-bold text-[var(--foreground)]">{totalProducts} products</h2>
             </div>
-          ))}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {[
+                { label: 'Total Stock', count: totalUnits, color: 'text-sky-600', subtle: 'bg-sky-50' },
+                { label: 'In Stock', count: inStockCount, color: 'text-emerald-600', subtle: 'bg-emerald-50' },
+                { label: 'Low Stock', count: lowStockCount, color: 'text-amber-600', subtle: 'bg-amber-50' },
+                { label: 'Out of Stock', count: outCount, color: 'text-red-600', subtle: 'bg-red-50' },
+              ].map((s) => (
+                <div key={s.label} className={`${s.subtle} rounded-[var(--radius-lg)] px-3 py-2.5`}>
+                  <div className={`text-2xl font-bold ${s.color}`}>{s.count}</div>
+                  <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-foreground)] mt-1">{s.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
+          <div className="mb-4 overflow-x-auto">
+            <div className="flex min-w-max gap-2">
+              {categories.map((category) => (
+                <button
+                  key={category}
+                  type="button"
+                  onClick={() => setSelectedCategory(category)}
+                  className={`rounded-full border px-3 py-1.5 text-xs font-medium whitespace-nowrap transition ${
+                    selectedCategory === category
+                      ? 'border-[var(--primary)] bg-[var(--primary)] text-white'
+                      : 'border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] hover:border-[var(--primary)] hover:text-[var(--primary)]'
+                  }`}
+                >
+                  {category}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <DataTable
-            data={inventory.map(i => ({ ...i, _status: getStatus(i.stock, i.reorderLevel) })) as any}
+            data={filteredInventory.map(i => ({ ...i, _status: getStatus(i.stock, i.reorderLevel) })) as any}
             columns={[
               { key: 'product', label: 'Product', render: (row: any) => (
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                   <img src={safeImage(row.image, row.product)} alt="" className="w-8 h-8 object-cover rounded bg-[var(--secondary)]" />
-                  <div>
-                    <div className="text-sm font-medium">{row.product}</div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-[var(--foreground)]">{row.product}</div>
                     <div className="text-xs text-[var(--muted-foreground)]">{row.brand} · {row.variantLabel}</div>
                   </div>
                 </div>
               )},
               { key: 'category', label: 'Category' },
+              { key: 'variantCount', label: 'Variants', render: (row: any) => <span className="text-sm text-[var(--muted-foreground)]">{row.variantCount}</span> },
               { key: 'stock', label: 'Current Stock', render: (row: any) => (
                 <div className="flex flex-col gap-1 min-w-24">
                   <span className="font-mono text-sm font-medium">{row.stock} units</span>
-                  <ProgressBar value={row.stock} max={400} />
+                  <ProgressBar value={row.stock} max={Math.max(100, row.stock || 10)} />
                 </div>
               )},
               { key: 'reorderLevel', label: 'Reorder At', render: (row: any) => <span className="font-mono text-sm text-[var(--muted-foreground)]">{row.reorderLevel} units</span> },
@@ -240,10 +323,21 @@ export default function AdminInventory() {
         <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={modalType === 'in' ? 'Record Stock In' : 'Record Stock Out'}>
           <div className="flex flex-col gap-4">
             <Select
+              label="Category *"
+              value={selectedCategory}
+              onChange={(e) => {
+                const nextCategory = e.target.value;
+                setSelectedCategory(nextCategory);
+                const firstItem = inventory.find(item => nextCategory === 'All' ? true : item.category === nextCategory);
+                setForm((prev) => ({ ...prev, inventoryId: firstItem ? firstItem.inventoryId : '' }));
+              }}
+              options={[{ value: 'All', label: 'All categories' }, ...categoryOptions]}
+            />
+            <Select
               label="Product Variant *"
               value={form.inventoryId}
               onChange={set('inventoryId')}
-              options={[{ value: '', label: 'Select product variant…' }, ...inventory.map(i => ({ value: i.inventoryId, label: `${i.product} — ${i.variantLabel} (${i.stock} in stock)` }))]}
+              options={[{ value: '', label: 'Select product variant…' }, ...modalInventoryOptions]}
             />
             <Input label="Quantity *" type="number" value={form.qty} onChange={set('qty')} placeholder="0" />
             <Input label={modalType === 'in' ? 'Purchase Order Ref.' : 'Sales Order Ref.'} value={form.ref} onChange={set('ref')} placeholder={modalType === 'in' ? 'PO-2026-XXXXXX' : 'ORD-2026-XXXXXX'} />

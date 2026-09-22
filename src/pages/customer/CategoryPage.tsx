@@ -14,6 +14,7 @@ import {
 } from "../../components/ui"
 import CustomerNav from "../../components/CustomerNav"
 import ProductModal from "../../components/ProductModal"
+import { safeImage } from "../../lib/image"
 
 const brands = ["Olay", "Pantene", "Head & Shoulders", "Secret", "Ivory"]
 const sortOptions = [
@@ -222,12 +223,20 @@ export default function CategoryPage() {
                     key={product.id}
                     className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300"
                   >
-                    <button
-                      className="block w-full relative aspect-square overflow-hidden bg-[var(--secondary)]"
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      className="block w-full relative aspect-square overflow-hidden bg-[var(--secondary)] cursor-pointer"
                       onClick={() => setModalProduct(product)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setModalProduct(product);
+                        }
+                      }}
                     >
                       <img
-                        src={product.image}
+                        src={safeImage(product.images?.[0] ?? product.image, product.name)}
                         alt={product.name}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
@@ -255,11 +264,13 @@ export default function CategoryPage() {
                         </div>
                       )}
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation()
                           toggleWishlist(product.id)
                         }}
                         className="absolute top-2 right-2 w-7 h-7 rounded-full bg-white/90 flex items-center justify-center shadow-sm opacity-0 group-hover:opacity-100 transition-all"
+                        aria-label={wishlist.includes(product.id) ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}
                       >
                         <svg
                           width="12"
@@ -274,7 +285,7 @@ export default function CategoryPage() {
                           <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
                         </svg>
                       </button>
-                    </button>
+                    </div>
                     <div className="p-3">
                       <div className="text-[10px] text-[var(--muted-foreground)] mb-0.5 font-medium">
                         {product.brand}

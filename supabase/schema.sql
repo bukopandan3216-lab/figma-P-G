@@ -3,7 +3,7 @@
 
 create extension if not exists pgcrypto;
 
-create table public.profiles (
+create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   full_name text not null default '',
   role text not null default 'Customer' check (role in ('Customer', 'Beauty Staff', 'Beauty Admin', 'Super Admin')),
@@ -14,14 +14,14 @@ create table public.profiles (
   created_at timestamptz not null default now()
 );
 
-create table public.brands (
+create table if not exists public.brands (
   id uuid primary key default gen_random_uuid(),
   name text unique not null,
   description text,
   created_at timestamptz not null default now()
 );
 
-create table public.categories (
+create table if not exists public.categories (
   id uuid primary key default gen_random_uuid(),
   name text unique not null,
   description text,
@@ -29,7 +29,7 @@ create table public.categories (
   created_at timestamptz not null default now()
 );
 
-create table public.products (
+create table if not exists public.products (
   id uuid primary key default gen_random_uuid(),
   brand_id uuid references public.brands(id),
   category_id uuid references public.categories(id),
@@ -47,7 +47,7 @@ create table public.products (
   created_at timestamptz not null default now()
 );
 
-create table public.product_variants (
+create table if not exists public.product_variants (
   id uuid primary key default gen_random_uuid(),
   product_id uuid not null references public.products(id) on delete cascade,
   size text,
@@ -56,7 +56,7 @@ create table public.product_variants (
   sku text unique not null
 );
 
-create table public.inventory (
+create table if not exists public.inventory (
   id uuid primary key default gen_random_uuid(),
   variant_id uuid not null unique references public.product_variants(id) on delete cascade,
   stock_quantity integer not null default 0 check (stock_quantity >= 0),
@@ -64,7 +64,7 @@ create table public.inventory (
   updated_at timestamptz not null default now()
 );
 
-create table public.suppliers (
+create table if not exists public.suppliers (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   contact_email text,
@@ -73,13 +73,13 @@ create table public.suppliers (
   created_at timestamptz not null default now()
 );
 
-create table public.supplier_products (
+create table if not exists public.supplier_products (
   supplier_id uuid not null references public.suppliers(id) on delete cascade,
   product_id uuid not null references public.products(id) on delete cascade,
   primary key (supplier_id, product_id)
 );
 
-create table public.purchase_orders (
+create table if not exists public.purchase_orders (
   id uuid primary key default gen_random_uuid(),
   created_by uuid references public.profiles(id),
   supplier_id uuid references public.suppliers(id),
@@ -88,7 +88,7 @@ create table public.purchase_orders (
   created_at timestamptz not null default now()
 );
 
-create table public.purchase_order_items (
+create table if not exists public.purchase_order_items (
   id uuid primary key default gen_random_uuid(),
   purchase_order_id uuid not null references public.purchase_orders(id) on delete cascade,
   product_id uuid not null references public.products(id),
@@ -96,7 +96,7 @@ create table public.purchase_order_items (
   unit_cost numeric(10, 2) not null check (unit_cost >= 0)
 );
 
-create table public.orders (
+create table if not exists public.orders (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id),
   total_amount numeric(10, 2) not null check (total_amount >= 0),
@@ -117,7 +117,7 @@ create table public.orders (
   created_at timestamptz not null default now()
 );
 
-create table public.order_items (
+create table if not exists public.order_items (
   id uuid primary key default gen_random_uuid(),
   order_id uuid not null references public.orders(id) on delete cascade,
   variant_id uuid not null references public.product_variants(id),
@@ -125,7 +125,7 @@ create table public.order_items (
   price_at_purchase numeric(10, 2) not null check (price_at_purchase >= 0)
 );
 
-create table public.recommendation_rules (
+create table if not exists public.recommendation_rules (
   id uuid primary key default gen_random_uuid(),
   rule_name text not null,
   trigger_skin_type text[] not null default '{}',
@@ -134,7 +134,7 @@ create table public.recommendation_rules (
   is_active boolean not null default true
 );
 
-create table public.payments (
+create table if not exists public.payments (
   id uuid primary key default gen_random_uuid(),
   order_id uuid not null references public.orders(id) on delete cascade,
   provider text not null,
@@ -144,7 +144,7 @@ create table public.payments (
   created_at timestamptz not null default now()
 );
 
-create table public.inventory_movements (
+create table if not exists public.inventory_movements (
   id uuid primary key default gen_random_uuid(),
   variant_id uuid not null references public.product_variants(id),
   movement_type text not null check (movement_type in ('Stock In', 'Stock Out')),
@@ -155,7 +155,7 @@ create table public.inventory_movements (
   created_at timestamptz not null default now()
 );
 
-create table public.cart_items (
+create table if not exists public.cart_items (
   user_id uuid not null references public.profiles(id) on delete cascade,
   product_id uuid not null references public.products(id) on delete cascade,
   quantity integer not null check (quantity > 0),
@@ -164,28 +164,28 @@ create table public.cart_items (
   primary key (user_id, product_id)
 );
 
-create table public.wishlist_items (
+create table if not exists public.wishlist_items (
   user_id uuid not null references public.profiles(id) on delete cascade,
   product_id uuid not null references public.products(id) on delete cascade,
   created_at timestamptz not null default now(),
   primary key (user_id, product_id)
 );
 
-create index products_brand_id_idx on public.products(brand_id);
-create index products_category_id_idx on public.products(category_id);
-create index product_variants_product_id_idx on public.product_variants(product_id);
-create index inventory_variant_id_idx on public.inventory(variant_id);
-create index supplier_products_product_id_idx on public.supplier_products(product_id);
-create index purchase_orders_supplier_id_idx on public.purchase_orders(supplier_id);
-create index purchase_order_items_product_id_idx on public.purchase_order_items(product_id);
-create index orders_user_id_idx on public.orders(user_id);
-create index order_items_order_id_idx on public.order_items(order_id);
-create index order_items_variant_id_idx on public.order_items(variant_id);
-create index inventory_movements_variant_id_idx on public.inventory_movements(variant_id);
-create index recommendation_rules_category_idx on public.recommendation_rules(target_category_id);
-create index purchase_orders_created_by_idx on public.purchase_orders(created_by);
-create index cart_items_product_id_idx on public.cart_items(product_id);
-create index wishlist_items_product_id_idx on public.wishlist_items(product_id);
+create index if not exists products_brand_id_idx on public.products(brand_id);
+create index if not exists products_category_id_idx on public.products(category_id);
+create index if not exists product_variants_product_id_idx on public.product_variants(product_id);
+create index if not exists inventory_variant_id_idx on public.inventory(variant_id);
+create index if not exists supplier_products_product_id_idx on public.supplier_products(product_id);
+create index if not exists purchase_orders_supplier_id_idx on public.purchase_orders(supplier_id);
+create index if not exists purchase_order_items_product_id_idx on public.purchase_order_items(product_id);
+create index if not exists orders_user_id_idx on public.orders(user_id);
+create index if not exists order_items_order_id_idx on public.order_items(order_id);
+create index if not exists order_items_variant_id_idx on public.order_items(variant_id);
+create index if not exists inventory_movements_variant_id_idx on public.inventory_movements(variant_id);
+create index if not exists recommendation_rules_category_idx on public.recommendation_rules(target_category_id);
+create index if not exists purchase_orders_created_by_idx on public.purchase_orders(created_by);
+create index if not exists cart_items_product_id_idx on public.cart_items(product_id);
+create index if not exists wishlist_items_product_id_idx on public.wishlist_items(product_id);
 
 create or replace function public.is_admin()
 returns boolean language sql stable security definer set search_path = public
@@ -302,6 +302,37 @@ alter table public.inventory_movements enable row level security;
 alter table public.cart_items enable row level security;
 alter table public.wishlist_items enable row level security;
 
+drop policy if exists profiles_self_or_admin on public.profiles;
+drop policy if exists public_active_products on public.products;
+drop policy if exists public_active_variants on public.product_variants;
+drop policy if exists public_brands on public.brands;
+drop policy if exists public_categories on public.categories;
+drop policy if exists public_inventory on public.inventory;
+drop policy if exists admin_brands on public.brands;
+drop policy if exists admin_categories on public.categories;
+drop policy if exists admin_products on public.products;
+drop policy if exists admin_variants on public.product_variants;
+drop policy if exists admin_inventory on public.inventory;
+drop policy if exists admin_suppliers on public.suppliers;
+drop policy if exists admin_supplier_products on public.supplier_products;
+drop policy if exists admin_purchase_orders on public.purchase_orders;
+drop policy if exists admin_purchase_items on public.purchase_order_items;
+drop policy if exists own_orders_or_admin on public.orders;
+drop policy if exists create_own_orders on public.orders;
+drop policy if exists own_order_items_or_admin on public.order_items;
+drop policy if exists create_own_order_items on public.order_items;
+drop policy if exists recommendation_read on public.recommendation_rules;
+drop policy if exists recommendation_admin on public.recommendation_rules;
+drop policy if exists admin_payments on public.payments;
+drop policy if exists own_payments on public.payments;
+drop policy if exists own_order_payment_insert on public.payments;
+drop policy if exists admin_movements on public.inventory_movements;
+drop policy if exists own_order_movement_insert on public.inventory_movements;
+drop policy if exists authenticated_inventory_update on public.inventory;
+drop policy if exists authenticated_inventory_insert on public.inventory;
+drop policy if exists own_cart_items on public.cart_items;
+drop policy if exists own_wishlist_items on public.wishlist_items;
+
 create policy profiles_self_or_admin on public.profiles for all using (id = auth.uid() or public.is_admin()) with check (id = auth.uid() or public.is_admin());
 create policy public_active_products on public.products for select using (status = 'Active' or public.is_admin());
 create policy public_active_variants on public.product_variants for select using (exists (select 1 from public.products p where p.id = product_id and (p.status = 'Active' or public.is_admin())));
@@ -325,8 +356,64 @@ create policy recommendation_read on public.recommendation_rules for select usin
 create policy recommendation_admin on public.recommendation_rules for all using (public.is_admin()) with check (public.is_admin());
 create policy admin_payments on public.payments for all using (public.is_admin()) with check (public.is_admin());
 create policy own_payments on public.payments for select using (exists (select 1 from public.orders o where o.id = order_id and o.user_id = auth.uid()));
+create policy own_order_payment_insert on public.payments for insert with check (
+  exists (select 1 from public.orders o where o.id = order_id and o.user_id = auth.uid())
+);
 create policy admin_movements on public.inventory_movements for all using (public.is_admin()) with check (public.is_admin());
+create policy own_order_movement_insert on public.inventory_movements for insert with check (
+  auth.uid() is not null and reference is not null and exists (
+    select 1 from public.orders o
+    where o.id::text = reference and o.user_id = auth.uid()
+  )
+);
+create policy authenticated_inventory_update on public.inventory for update using (auth.uid() is not null) with check (auth.uid() is not null);
+create policy authenticated_inventory_insert on public.inventory for insert with check (auth.uid() is not null);
 create policy own_cart_items on public.cart_items for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy own_wishlist_items on public.wishlist_items for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+create table if not exists public.support_inquiries (
+  id bigint generated by default as identity primary key,
+  customer_name text not null default 'Customer',
+  email text not null,
+  subject text not null default 'Support Request',
+  message text not null,
+  status text not null default 'Open' check (status in ('Open', 'Pending', 'Resolved')),
+  channel text not null default 'Chat',
+  sentiment text not null default 'Needs review',
+  support_reply text default '',
+  last_reply text default 'Just now',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.support_responses (
+  id bigint generated by default as identity primary key,
+  inquiry_id bigint references public.support_inquiries(id) on delete cascade,
+  customer_name text not null,
+  email text not null,
+  response text not null,
+  sent_at timestamptz not null default now()
+);
+
+create index if not exists support_inquiries_status_idx on public.support_inquiries(status);
+create index if not exists support_inquiries_created_at_idx on public.support_inquiries(created_at desc);
+create index if not exists support_responses_inquiry_id_idx on public.support_responses(inquiry_id);
+
+alter table public.support_inquiries enable row level security;
+alter table public.support_responses enable row level security;
+
+drop policy if exists support_inquiries_select_all on public.support_inquiries;
+drop policy if exists support_inquiries_insert_all on public.support_inquiries;
+drop policy if exists support_inquiries_update_all on public.support_inquiries;
+drop policy if exists support_responses_select_all on public.support_responses;
+drop policy if exists support_responses_insert_all on public.support_responses;
+drop policy if exists support_responses_update_all on public.support_responses;
+
+create policy support_inquiries_select_all on public.support_inquiries for select using (true);
+create policy support_inquiries_insert_all on public.support_inquiries for insert with check (true);
+create policy support_inquiries_update_all on public.support_inquiries for update using (true) with check (true);
+
+create policy support_responses_select_all on public.support_responses for select using (true);
+create policy support_responses_insert_all on public.support_responses for insert with check (true);
+create policy support_responses_update_all on public.support_responses for update using (true) with check (true);
 
 grant execute on function public.place_order(uuid, jsonb, numeric, numeric, numeric, numeric, text, text, text, text, text, text, text, text) to authenticated;

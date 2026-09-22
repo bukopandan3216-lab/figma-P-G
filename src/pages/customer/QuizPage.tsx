@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowRight, ArrowLeft, Check, Sparkles } from 'lucide-react';
 import { Button } from '../../components/ui';
 import CustomerNav from '../../components/CustomerNav';
+import { useAuth } from '../../context/AuthContext';
+import { supabase } from '../../lib/supabase';
 
 
 interface QuizStep {
@@ -108,7 +110,9 @@ export default function QuizPage() {
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState<(string | string[])[]>(Array(steps.length).fill(null));
   const [done, setDone] = useState(false);
+  const [additionalConcern, setAdditionalConcern] = useState('');
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   //added
   const concern = answers[0] as string;
@@ -192,6 +196,33 @@ const answer = answers[steps.findIndex((s) => s.id === current.id)];
    // else setDone(true);
   //};
 
+  const persistQuizProfile = () => {
+    const profile = {
+      concern: answers[0] || null,
+      skinType: answers[steps.findIndex((s) => s.id === 'skinType')] || null,
+      skinConcern: answers[steps.findIndex((s) => s.id === 'skinConcern')] || [],
+      hairType: answers[steps.findIndex((s) => s.id === 'hairType')] || null,
+      hairConcern: answers[steps.findIndex((s) => s.id === 'hairConcern')] || [],
+      bodyConcern: answers[steps.findIndex((s) => s.id === 'bodyConcern')] || [],
+      ageRange: answers[steps.findIndex((s) => s.id === 'age')] || null,
+      additionalConcern: additionalConcern.trim(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const history = JSON.parse(localStorage.getItem('pgbeauty-quiz-history') || '[]');
+    const nextHistory = [
+      ...history.filter((item: any) => item.updatedAt !== profile.updatedAt),
+      profile,
+    ];
+
+    localStorage.setItem('pgbeauty-ai-profile', JSON.stringify(profile));
+    localStorage.setItem('pgbeauty-quiz-history', JSON.stringify(nextHistory));
+
+    if (user?.id && supabase) {
+      void supabase.from('profiles').update({ skin_profile: profile }).eq('id', user.id);
+    }
+  };
+
   if (done) return (
     <div className="min-h-screen bg-[var(--background)]">
       <CustomerNav />
@@ -201,44 +232,45 @@ const answer = answers[steps.findIndex((s) => s.id === current.id)];
         </div>
         <h1 className="font-display text-4xl mb-3">Your Profile is Ready!</h1>
         <p className="text-[var(--muted-foreground)] mb-8">We've analyzed your beauty profile and curated personalized product recommendations just for you.</p>
-        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 mb-8 text-left">
-          
-          
-          {filteredSteps.map((s) => {
-  const index = steps.findIndex((step) => step.id === s.id);
 
-  return (
-    <div key={s.id} className="flex items-start gap-3 py-2.5 border-b border-[var(--border)] last:border-0 text-sm">
-      <Check size={14} className="text-[var(--primary)] mt-0.5 flex-shrink-0" />
-      <div>
-        <span className="font-medium">
-          {s.question.replace('What is your ', '').replace('What are your ', '').replace('?', '').replace(/^\w/, c => c.toUpperCase())}:
-        </span>{' '}
-        <span className="text-[var(--muted-foreground)]">
-          {Array.isArray(answers[index])
-            ? (answers[index] as string[]).join(', ') || 'None selected'
-            : (answers[index] as string) || 'Not answered'}
-        </span>
-      </div>
-    </div>
-  );
-})}
-          
-          {/* {filteredSteps.map((s, i) => (
-                      <div key={i} className="flex items-start gap-3 py-2.5 border-b border-[var(--border)] last:border-0 text-sm">
-                        <Check size={14} className="text-[var(--primary)] mt-0.5 flex-shrink-0" />
-                        <div>
-                          <span className="font-medium">{s.question.replace('What is your ', '').replace('What are your ', '').replace('?', '').replace(/^\w/, c => c.toUpperCase())}: </span>
-                          <span className="text-[var(--muted-foreground)]">
-                            {Array.isArray(answers[i]) ? (answers[i] as string[]).join(', ') || 'None selected' : (answers[i] as string) || 'Not answered'}
-                          </span>
-                        </div>
-                      </div>
-                    )
-                    )} 
-          )*/}
+        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 mb-6 text-left">
+          {filteredSteps.map((s) => {
+            const index = steps.findIndex((step) => step.id === s.id);
+            return (
+              <div key={s.id} className="flex items-start gap-3 py-2.5 border-b border-[var(--border)] last:border-0 text-sm">
+                <Check size={14} className="text-[var(--primary)] mt-0.5 flex-shrink-0" />
+                <div>
+                  <span className="font-medium">
+                    {s.question.replace('What is your ', '').replace('What are your ', '').replace('?', '').replace(/^\w/, c => c.toUpperCase())}:
+                  </span>{' '}
+                  <span className="text-[var(--muted-foreground)]">
+                    {Array.isArray(answers[index])
+                      ? (answers[index] as string[]).join(', ') || 'None selected'
+                      : (answers[index] as string) || 'Not answered'}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
-        <Button size="lg" onClick={() => navigate('/for-you')}>
+
+        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 mb-8 text-left">
+          <label className="block text-sm font-medium text-[var(--foreground)] mb-2">Anything else we should know?</label>
+          <textarea
+            value={additionalConcern}
+            onChange={(e) => setAdditionalConcern(e.target.value)}
+            placeholder="For example: I get irritated by fragrance, my scalp gets flaky in winter, or I want to reduce dark spots..."
+            className="w-full min-h-[110px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--secondary)] px-3 py-2.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/20"
+          />
+        </div>
+
+        <Button
+          size="lg"
+          onClick={() => {
+            persistQuizProfile();
+            navigate('/for-you');
+          }}
+        >
           View My Recommendations <ArrowRight size={16} />
         </Button>
       </div>

@@ -33,6 +33,7 @@ export interface RegisterData {
 }
 
 const Ctx = createContext<AuthCtx | null>(null);
+const USER_STORAGE_KEY = 'pgbeauty-user';
 
 type ProfileRow = {
   id: string;
@@ -61,21 +62,58 @@ function toUser(authUser: SupabaseUser, profile?: ProfileRow | null): User {
   };
 }
 
+function readStoredUser() {
+  try {
+    const raw = localStorage.getItem(USER_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as User) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistUser(nextUser: User | null) {
+  try {
+    if (!nextUser) {
+      localStorage.removeItem(USER_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(nextUser));
+  } catch {
+    // Ignore storage quota issues.
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(() => readStoredUser());
   const [loading, setLoading] = useState(true);
 
   const loadProfile = async (authUser: SupabaseUser | null) => {
     if (!authUser) {
       setUser(null);
+      persistUser(null);
       return;
     }
+
+    const storedUser = readStoredUser();
     const { data, error } = await supabase.from('profiles').select('*').eq('id', authUser.id).maybeSingle();
-    if (error) {
-      setUser(toUser(authUser));
-      return;
-    }
-    setUser(toUser(authUser, data));
+    const dbUser = toUser(authUser, data);
+    const nextUser = storedUser && storedUser.id === authUser.id
+      ? {
+          ...dbUser,
+          id: authUser.id,
+          email: dbUser.email || storedUser.email,
+          firstName: dbUser.firstName || storedUser.firstName,
+          lastName: dbUser.lastName || storedUser.lastName,
+          phone: dbUser.phone || storedUser.phone,
+          birthday: dbUser.birthday || storedUser.birthday,
+          role: dbUser.role || storedUser.role,
+          initials: dbUser.initials || storedUser.initials,
+        }
+      : dbUser;
+
+    setUser(nextUser);
+    persistUser(nextUser);
+    if (error) return;
   };
 
   useEffect(() => {
@@ -141,17 +179,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     await supabase.auth.signOut();
     setUser(null);
+    persistUser(null);
   };
 
   const updateUser = async (data: Partial<User>) => {
     if (!user) return;
+
+    const nextFirstName = (data.firstName || user.firstName || '').trim();
+    const nextLastName = (data.lastName || user.lastName || '').trim();
+    const nextPhone = data.phone?.trim() ? data.phone.trim() : user.phone || undefined;
+    const nextBirthday = data.birthday && data.birthday !== '' ? data.birthday : user.birthday || undefined;
+
     const profileData = {
-      full_name: `${data.firstName || user.firstName} ${data.lastName || user.lastName}`.trim(),
-      phone: data.phone,
-      birthday: data.birthday,
+      id: user.id,
+      full_name: `${nextFirstName} ${nextLastName}`.trim(),
+      email: user.email,
+      phone: nextPhone || null,
+      birthday: nextBirthday || null,
     };
-    const { data: updated } = await supabase.from('profiles').update(profileData).eq('id', user.id).select('*').single();
-    setUser(updated ? toUser({ id: user.id, email: user.email } as SupabaseUser, updated) : { ...user, ...data });
+
+    const { data: updated, error } = await supabase
+      .from('profiles')
+      .upsert(profileData, { onConflict: 'id' })
+      .select('*')
+      .maybeSingle();
+
+    if (error) throw error;
+
+    const mergedUser = {
+      ...user,
+      firstName: nextFirstName || user.firstName,
+      lastName: nextLastName || user.lastName,
+      phone: nextPhone,
+      birthday: nextBirthday,
+      initials: `${(nextFirstName || user.firstName || 'U')[0]}${(nextLastName || user.lastName || 'U')[0]}`.toUpperCase(),
+    };
+
+    const nextUser = updated ? toUser({ id: user.id, email: user.email } as SupabaseUser, updated) : mergedUser;
+    setUser(nextUser);
+    persistUser(nextUser);
   };
 
   const isAdmin = !!user && ['super_admin', 'beauty_admin', 'beauty_staff'].includes(user.role);

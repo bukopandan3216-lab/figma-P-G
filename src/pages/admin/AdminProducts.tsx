@@ -33,6 +33,7 @@ export default function AdminProducts() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [uploadedImages, setUploadedImages] = useState<File[]>([]);
   const [form, setForm] = useState({ name: '', brand: BRANDS[0], category: CATEGORIES[0], price: '', stock: '', status: 'Active' as ProductStatus });
   const { toasts, add: addToast, remove } = useToast();
 
@@ -40,17 +41,26 @@ export default function AdminProducts() {
 
   const openAdd = () => {
     setEditId(null);
+    setUploadedImages([]);
     setForm({ name: '', brand: BRANDS[0], category: CATEGORIES[0], price: '', stock: '', status: 'Active' });
     setModalOpen(true);
   };
 
   const openEdit = (p: AdminProduct) => {
     setEditId(p.id);
+    setUploadedImages([]);
     setForm({ name: p.name, brand: p.brand, category: p.category, price: String(p.price), stock: String(p.stock), status: p.status });
     setModalOpen(true);
   };
 
-  const save = () => {
+  const readAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Unable to read file')); 
+    reader.readAsDataURL(file);
+  });
+
+  const save = async () => {
     if (!form.name.trim()) { addToast('error', 'Product name is required.'); return; }
     if (!form.price || isNaN(+form.price)) { addToast('error', 'Enter a valid price.'); return; }
     if (editId) {
@@ -59,20 +69,41 @@ export default function AdminProducts() {
         else { setProductList(prev => prev.map(p => p.id === editId ? { ...p, ...form, price: +form.price, stock: +form.stock || p.stock } : p)); void refresh(); }
       });
       addToast('success', 'Product updated successfully!');
-    } else {
-      void (async () => {
-        const { data: brand } = await supabase.from('brands').select('id').eq('name', form.brand).single();
-        const { data: category } = await supabase.from('categories').select('id').eq('name', form.category).single();
-        const { data: product, error } = await supabase.from('products').insert({ name: form.name, brand_id: brand?.id, category_id: category?.id, price: +form.price, image: '', description: '', tags: [], status: form.status }).select('id').single();
-        if (error) { addToast('error', error.message); return; }
-        const { data: variant, error: variantError } = await supabase.from('product_variants').insert({ product_id: product.id, sku: `SKU-${crypto.randomUUID()}` }).select('id').single();
-        if (variantError) { addToast('error', variantError.message); return; }
-        await supabase.from('inventory').insert({ variant_id: variant.id, stock_quantity: +form.stock || 0 });
-        addToast('success', 'Product added successfully!');
-        await refresh();
-      })();
+      setModalOpen(false);
+      return;
     }
-    setModalOpen(false);
+
+    try {
+      const uploadedUrls = uploadedImages.length ? await Promise.all(uploadedImages.map(readAsDataUrl)) : [];
+      const primaryImage = uploadedUrls[0] || '';
+      const images = uploadedUrls.length > 1 ? uploadedUrls : [];
+
+      const { data: brand } = await supabase.from('brands').select('id').eq('name', form.brand).single();
+      const { data: category } = await supabase.from('categories').select('id').eq('name', form.category).single();
+      const { data: product, error } = await supabase.from('products').insert({
+        name: form.name,
+        brand_id: brand?.id,
+        category_id: category?.id,
+        price: +form.price,
+        image: primaryImage,
+        images: images,
+        description: '',
+        tags: [],
+        status: form.status,
+      }).select('id').single();
+
+      if (error) { addToast('error', error.message); return; }
+
+      const { data: variant, error: variantError } = await supabase.from('product_variants').insert({ product_id: product.id, sku: `SKU-${crypto.randomUUID()}` }).select('id').single();
+      if (variantError) { addToast('error', variantError.message); return; }
+
+      await supabase.from('inventory').insert({ variant_id: variant.id, stock_quantity: +form.stock || 0 });
+      addToast('success', 'Product added successfully!');
+      await refresh();
+      setModalOpen(false);
+    } catch (error) {
+      addToast('error', error instanceof Error ? error.message : 'Unable to upload product images.');
+    }
   };
 
   const confirmDelete = () => {
@@ -140,11 +171,22 @@ export default function AdminProducts() {
             </div>
             <div className="col-span-2">
               <label className="text-sm font-medium block mb-2">Product Image</label>
-              <div className="border-2 border-dashed border-[var(--border)] rounded-[var(--radius-lg)] p-8 text-center text-sm text-[var(--muted-foreground)] hover:border-[var(--primary)] transition-colors cursor-pointer">
-                <div className="text-2xl mb-2">📁</div>
-                <div>Click to upload or drag and drop</div>
-                <div className="text-xs mt-1">PNG, JPG up to 10MB</div>
-              </div>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(event) => setUploadedImages(Array.from(event.target.files || []))}
+                className="block w-full text-sm text-[var(--muted-foreground)] file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-[var(--secondary)] file:text-[var(--foreground)] file:font-medium hover:file:bg-[var(--muted)]"
+              />
+              {uploadedImages.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {uploadedImages.slice(0, 4).map((file, index) => (
+                    <span key={`${file.name}-${index}`} className="rounded-full border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs text-[var(--muted-foreground)]">
+                      {file.name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <div className="flex gap-3 mt-6">

@@ -198,6 +198,44 @@ export function DataTable<T extends Record<string, unknown>>({
     setPage(1);
   };
 
+  const getRowKey = (row: T, index: number) => {
+    if (row && typeof row === 'object') {
+      const record = row as Record<string, unknown>;
+      const preferred = [
+        record.id,
+        record.inventoryId,
+        record.variantId,
+        record.productId,
+        record.product_id,
+        record.variant_id,
+        record.uuid,
+        record.sku,
+        record.slug,
+        record.email,
+        record.cluster,
+        record.label,
+        record.product,
+        record.name,
+      ].find(value => value !== undefined && value !== null && value !== '');
+
+      if (preferred !== undefined) {
+        const base = String(preferred);
+        const variantHint = [
+          record.variantLabel,
+          record.variant,
+          record.size,
+          record.scent,
+          record.category,
+          record.brand,
+        ].find(value => value !== undefined && value !== null && value !== '');
+
+        return variantHint ? `${base}-${String(variantHint)}` : base;
+      }
+    }
+
+    return `row-${index}`;
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <div className="relative w-full max-w-xs">
@@ -231,9 +269,9 @@ export function DataTable<T extends Record<string, unknown>>({
             {rows.length === 0 ? (
               <tr><td colSpan={columns.length} className="px-4 py-12 text-center text-[var(--muted-foreground)]">{emptyMessage}</td></tr>
             ) : rows.map((row, i) => (
-              <tr key={i} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--secondary)] transition-colors">
+              <tr key={getRowKey(row, i)} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--secondary)] transition-colors">
                 {columns.map(col => (
-                  <td key={String(col.key)} className="px-4 py-3 text-[var(--foreground)]">
+                  <td key={`${getRowKey(row, i)}-${String(col.key)}`} className="px-4 py-3 text-[var(--foreground)]">
                     {col.render ? col.render(row) : String(row[col.key as keyof T] ?? '')}
                   </td>
                 ))}
