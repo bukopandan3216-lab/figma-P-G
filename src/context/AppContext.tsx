@@ -140,7 +140,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setCart(nextCart);
     persistLocalData(nextCart, wishlist);
 
-    if (user) void supabase.from('cart_items').upsert({ user_id: user.id, product_id: item.id, quantity: nextQuantity }, { onConflict: 'user_id,product_id' });
+    if (user) void supabase.from('cart_items').upsert({
+      user_id: user.id,
+      product_id: item.id,
+      quantity: nextQuantity,
+      variant_id: item.variant || existing?.variant || null,
+    }, { onConflict: 'user_id,product_id' });
   };
   const removeFromCart = (id: string) => {
     const nextCart = cart.filter(i => i.id !== id);

@@ -16,7 +16,6 @@ import CustomerNav from "../../components/CustomerNav"
 import ProductModal from "../../components/ProductModal"
 import { safeImage } from "../../lib/image"
 
-const brands = ["Olay", "Pantene", "Head & Shoulders", "Secret", "Ivory"]
 const sortOptions = [
   "Featured",
   "Price: Low to High",
@@ -29,12 +28,15 @@ export default function CategoryPage() {
   const { id } = useParams<{ id: string }>()
   const [selectedBrands, setSelectedBrands] = useState<string[]>([])
   const [priceRange, setPriceRange] = useState<[number, number]>([0, 0])
+  const [inStockOnly, setInStockOnly] = useState(false)
+  const [onSaleOnly, setOnSaleOnly] = useState(false)
   const [sort, setSort] = useState("Featured")
   const [filterOpen, setFilterOpen] = useState(false)
   const [modalProduct, setModalProduct] = useState<Product | null>(null)
   const { addToCart, wishlist, toggleWishlist } = useCart()
   const { products, loading, error } = useCatalog()
   const maxPrice = Math.ceil(Math.max(...products.map((product) => product.price), 0))
+  const brands = [...new Set(products.map(product => product.brand).filter(Boolean))].sort()
 
   useEffect(() => {
     const handler = (e: CustomEvent) => setModalProduct(e.detail)
@@ -55,14 +57,16 @@ export default function CategoryPage() {
       ? "Skin Care"
       : id === "hair-care"
         ? "Hair Care"
-        : id === "body-care"
-          ? "Body Care"
+        : id === "personal-body-care" || id === "body-care" || id === "personal-care"
+          ? "Personal & Body Care"
           : "All Products"
 
   let filtered = products.filter((p) => {
+    if (p.category === "Oral Care") return false
     const matchesCat =
       id === "all" ||
       id === undefined ||
+      ((id === "personal-body-care" || id === "body-care" || id === "personal-care") && (p.category === "Personal Care" || p.category === "Body Care")) ||
       p.category.toLowerCase().replace(" ", "-") === id ||
       p.category
         .toLowerCase()
@@ -71,7 +75,8 @@ export default function CategoryPage() {
     const matchesBrand =
       selectedBrands.length === 0 || selectedBrands.includes(p.brand)
     const matchesPrice = p.price >= priceRange[0] && p.price <= priceRange[1]
-    return matchesCat && matchesBrand && matchesPrice
+    const matchesAvailability = (!inStockOnly || p.inStock) && (!onSaleOnly || Boolean(p.originalPrice && p.originalPrice > p.price))
+    return matchesCat && matchesBrand && matchesPrice && matchesAvailability
   })
 
   if (sort === "Price: Low to High")
@@ -113,15 +118,15 @@ export default function CategoryPage() {
       <div>
         <h3 className="text-sm font-semibold mb-3">Availability</h3>
         <div className="flex flex-col gap-2">
-          <Checkbox checked={false} onChange={() => {}} label="In Stock Only" />
-          <Checkbox checked={false} onChange={() => {}} label="On Sale" />
+          <Checkbox checked={inStockOnly} onChange={() => setInStockOnly(value => !value)} label="In Stock Only" />
+          <Checkbox checked={onSaleOnly} onChange={() => setOnSaleOnly(value => !value)} label="On Sale" />
         </div>
       </div>
-      {selectedBrands.length > 0 && (
+      {(selectedBrands.length > 0 || inStockOnly || onSaleOnly || priceRange[0] > 0 || priceRange[1] < maxPrice) && (
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setSelectedBrands([])}
+          onClick={() => { setSelectedBrands([]); setInStockOnly(false); setOnSaleOnly(false); setPriceRange([0, maxPrice]) }}
           
         >
           <X size={14} /> Clear Filters
@@ -221,7 +226,16 @@ export default function CategoryPage() {
                 {filtered.map((product) => (
                   <div
                     key={product.id}
-                    className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setModalProduct(product)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setModalProduct(product)
+                      }
+                    }}
+                    className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300 cursor-pointer"
                   >
                     <div
                       role="button"
@@ -269,7 +283,7 @@ export default function CategoryPage() {
                           e.stopPropagation()
                           toggleWishlist(product.id)
                         }}
-                        className="absolute top-2 right-2 w-7 h-7 rounded-full bg-white/90 flex items-center justify-center shadow-sm opacity-0 group-hover:opacity-100 transition-all"
+                        className={`absolute top-2 right-2 w-7 h-7 rounded-full bg-white/90 flex items-center justify-center shadow-sm transition-all ${wishlist.includes(product.id) ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
                         aria-label={wishlist.includes(product.id) ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}
                       >
                         <svg
@@ -315,15 +329,19 @@ export default function CategoryPage() {
                         </div>
                         <Button
                           size="sm"
-                          onClick={() =>
+                          onClick={(e) => {
+                            e.stopPropagation()
                             addToCart({
                               id: product.id,
                               name: product.name,
                               brand: product.brand,
                               price: product.price,
                               image: product.image,
+                              stock: product.stock,
+                              inStock: product.inStock,
+                              variant: product.variantId,
                             })
-                          }
+                          }}
                           disabled={!product.inStock}
                           className="text-xs px-2.5 py-1"
                         >

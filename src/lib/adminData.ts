@@ -64,9 +64,19 @@ export async function fetchPurchases() {
 }
 
 export async function fetchCustomers() {
-  const { data, error } = await supabase.from('profiles').select('id, full_name, email, phone, created_at, orders(total_amount)').eq('role', 'Customer').order('created_at', { ascending: false });
-  if (error) throw error;
-  return (data || []).map((row: any) => ({ id: row.id, name: row.full_name, email: row.email, phone: row.phone || '', joined: new Date(row.created_at).toLocaleDateString(), orders: row.orders?.length || 0, total: `₱${(row.orders || []).reduce((sum: number, order: any) => sum + Number(order.total_amount || 0), 0).toFixed(2)}`, segment: (row.orders?.length || 0) > 10 ? 'VIP' : (row.orders?.length || 0) > 2 ? 'Regular' : 'New' }));
+  const [{ data: profiles, error: profilesError }, { data: orders }] = await Promise.all([
+    supabase.from('profiles').select('id, full_name, email, phone, created_at, skin_profile, role').order('created_at', { ascending: false }),
+    supabase.from('orders').select('id, user_id, order_no, created_at, total_amount, status').order('created_at', { ascending: false }),
+  ]);
+  if (profilesError) throw profilesError;
+  const ordersByCustomer = new Map<string, any[]>();
+  (orders || []).forEach(order => ordersByCustomer.set(order.user_id, [...(ordersByCustomer.get(order.user_id) || []), order]));
+  const adminRoles = new Set(['Super Admin', 'Beauty Admin', 'Beauty Staff']);
+  return (profiles || []).filter((row: any) => !adminRoles.has(row.role)).map((row: any) => {
+    const customerOrders = ordersByCustomer.get(row.id) || [];
+    const total = customerOrders.reduce((sum, order) => sum + Number(order.total_amount || 0), 0);
+    return { id: row.id, name: row.full_name || 'Customer', email: row.email || '', phone: row.phone || '', joined: new Date(row.created_at).toLocaleDateString(), orders: customerOrders.length, total: `₱${total.toFixed(2)}`, segment: customerOrders.length > 10 ? 'VIP' : customerOrders.length > 2 ? 'Regular' : 'New', skinProfile: row.skin_profile || {}, orderHistory: customerOrders };
+  });
 }
 
 export async function fetchTransactions() {
@@ -117,26 +127,51 @@ export async function fetchRecommendationRules() {
 }
 
 export async function fetchDashboardData() {
-  const [{ data: monthly, error: monthlyError }, { data: productSales, error: productsError }, { count: customerCount, error: customersError }, { count: lowStock, error: inventoryError }] = await Promise.all([
+  const [
+    { data: monthly, error: monthlyError },
+    { data: productSales, error: productsError },
+    { data: orders, error: ordersError },
+    { count: customerCount, error: customersError },
+    { count: activeCustomerCount, error: activeCustomersError },
+    { count: productCount, error: productCountError },
+    { count: supplierCount, error: suppliersError },
+    { data: inventoryRows, error: inventoryRowsError },
+    { count: lowStock, error: lowStockError },
+  ] = await Promise.all([
     supabase.from('sales_by_month').select('*').order('month_date'),
-    supabase.from('product_sales').select('id, name, category_id, revenue, units_sold, stock').order('revenue', { ascending: false }),
+    supabase.from('product_sales').select('id, name, category_id, category_name, revenue, units_sold, stock').order('revenue', { ascending: false }),
+    supabase.from('orders').select('total_amount, status'),
     supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'Customer'),
+    supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'Customer').gt('last_seen_at', new Date(Date.now() - 2 * 60 * 1000).toISOString()),
+    supabase.from('products').select('id', { count: 'exact', head: true }).eq('status', 'Active'),
+    supabase.from('suppliers').select('id', { count: 'exact', head: true }),
+    supabase.from('inventory').select('stock_quantity'),
     supabase.from('inventory').select('variant_id', { count: 'exact', head: true }).lt('stock_quantity', 10),
   ]);
-  if (monthlyError || productsError || customersError || inventoryError) throw monthlyError || productsError || customersError || inventoryError;
+  if (monthlyError || productsError || ordersError || customersError || activeCustomersError || productCountError || suppliersError || inventoryRowsError || lowStockError) {
+    throw monthlyError || productsError || ordersError || customersError || activeCustomersError || productCountError || suppliersError || inventoryRowsError || lowStockError;
+  }
   const rows = productSales || [];
-  const totalSales = rows.reduce((sum, row) => sum + Number(row.revenue || 0), 0);
+  const totalSales = (orders || []).filter(order => order.status !== 'Cancelled').reduce((sum, order) => sum + Number(order.total_amount || 0), 0);
   return {
     salesData: monthly || [],
     topProducts: rows.slice(0, 5).map(row => ({ name: row.name, sales: Number(row.revenue || 0) })),
     categoryData: Object.values(rows.reduce((groups: Record<string, { name: string; value: number }>, row: any) => {
-      const group = groups[row.category_id] || { name: row.category_id, value: 0 };
+      if (row.category_name === 'Oral Care') return groups;
+      const categoryKey = row.category_name === 'Personal Care' || row.category_name === 'Body Care'
+        ? 'Personal & Body Care'
+        : row.category_name || row.category_id || 'Uncategorized';
+      const group = groups[categoryKey] || { name: categoryKey, value: 0 };
       group.value += Number(row.revenue || 0);
-      groups[row.category_id] = group;
+      groups[categoryKey] = group;
       return groups;
     }, {})),
     totalSales,
     customerCount: customerCount || 0,
+    activeCustomerCount: activeCustomerCount || 0,
+    productCount: productCount || 0,
+    supplierCount: supplierCount || 0,
+    inventoryUnits: (inventoryRows || []).reduce((sum, row) => sum + Number(row.stock_quantity || 0), 0),
     lowStock: lowStock || 0,
   };
 }

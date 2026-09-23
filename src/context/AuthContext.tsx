@@ -134,11 +134,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!user || user.role !== 'customer') return;
+    const markActive = () => {
+      void supabase.rpc('touch_customer_activity')
+        .then(({ error }) => { if (error) console.error('Unable to update customer activity:', error.message); });
+    };
+    const handleVisibility = () => { if (document.visibilityState === 'visible') markActive(); };
+    markActive();
+    const interval = window.setInterval(markActive, 30_000);
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', markActive);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', markActive);
+    };
+  }, [user?.id, user?.role]);
+
   const unavailable = () => ({ ok: false, error: 'Supabase is not configured. Add the VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY environment variables.' });
 
   const login = async (email: string, password: string, role?: string) => {
     if (!isSupabaseConfigured) return unavailable();
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    const normalizedEmail = email.trim().toLowerCase();
+    const { data, error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
     if (error || !data.user) return { ok: false, error: error?.message || 'Login failed.' };
     await loadProfile(data.user);
     const nextRole = (await supabase.from('profiles').select('role').eq('id', data.user.id).maybeSingle()).data?.role;

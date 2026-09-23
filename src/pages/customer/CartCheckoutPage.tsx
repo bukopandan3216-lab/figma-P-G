@@ -105,6 +105,7 @@ export default function CartCheckoutPage() {
         shipping,
         paymentMethod,
       });
+      cart.forEach(item => removeFromCart(item.id));
       setOrderNumber(order.order_number || order.order_no || 'N/A');
       setStep(2);
     } catch (cause) {

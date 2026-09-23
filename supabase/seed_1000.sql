@@ -1,6 +1,6 @@
 -- P&G Beauty curated production seed
 -- Run schema.sql, then seed.sql, then this file in Supabase SQL Editor.
--- This file uses real brand/product/category names and never creates passwords.
+-- Authentication accounts are managed by Supabase Auth, not this seed.
 -- It preserves profiles with an admin role and wipes all other public business data.
 -- Run only when a full data reset is intended.
 
@@ -18,7 +18,6 @@ delete from public.wishlist_items;
 delete from public.inventory_movements;
 delete from public.purchase_order_items;
 delete from public.purchase_orders;
-delete from public.supplier_products;
 delete from public.inventory;
 delete from public.product_variants;
 delete from public.products;
@@ -35,12 +34,15 @@ select
   auth_user.id,
   coalesce(nullif(auth_user.raw_user_meta_data ->> 'full_name', ''), split_part(coalesce(auth_user.email, ''), '@', 1)),
   auth_user.email,
-  case when existing.role is not null then existing.role else 'Customer' end
+  coalesce(existing.role, 'Customer')
 from auth.users auth_user
 left join public.profiles existing on existing.id = auth_user.id
 where existing.role in ('Super Admin', 'Beauty Admin', 'Beauty Staff')
   or lower(auth_user.email) = lower('bukopandan3216@gmail.com')
-on conflict (id) do update set email = excluded.email;
+on conflict (id) do update
+set full_name = excluded.full_name,
+    email = excluded.email,
+    role = excluded.role;
 
 update public.profiles
 set role = 'Super Admin'
@@ -171,15 +173,7 @@ from (values
   ('Puregold Price Club Inc.', null, '+63 2 8528 8000', 'Quezon City, Metro Manila'),
   ('Robinsons Retail Holdings Inc.', null, '+63 2 8397 8888', 'Quezon City, Metro Manila')
 ) as supplier(name, contact_email, phone, address)
-where not exists (select 1 from public.suppliers existing where existing.name = 'Procter & Gamble Philippines Inc.');
-
-insert into public.supplier_products (supplier_id, product_id)
-select supplier.id, product.id
-from public.suppliers supplier
-cross join public.products product
-where supplier.name in ('Procter & Gamble Philippines Inc.','Rustan Commercial Corporation','Watsons Philippines','SM Retail Inc.','Puregold Price Club Inc.','Robinsons Retail Holdings Inc.')
-and product.status = 'Active'
-on conflict do nothing;
+where not exists (select 1 from public.suppliers existing where existing.name = supplier.name);
 
 insert into public.purchase_orders (created_by, supplier_id, status, total_cost, created_at)
 select admin_profile.id, supplier.id, status.value, total.value, now() - days.value * interval '1 day'

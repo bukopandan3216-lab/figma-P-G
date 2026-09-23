@@ -27,7 +27,7 @@ import {
 
 function CustomerChatStack() {
   return (
-    <div className="fixed bottom-6 right-6 z-[100] flex flex-col items-end gap-3">
+    <div className="fixed bottom-6 right-6 z-100 flex flex-col items-end gap-3">
       <FloatingChat variant="ai" title="AI Stylist" subtitle="Beauty recommendations" />
       <FloatingChat variant="support" title="Support Desk" subtitle="Help and customer care" />
     </div>

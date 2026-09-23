@@ -395,8 +395,9 @@ export function RangeSlider({ min, max, value, onChange, label }: {
   return (
     <div className="flex flex-col gap-2">
       {label && <label className="text-sm font-medium">{label}</label>}
-      <div className="flex items-center gap-3">
-        <input type="range" min={min} max={max} value={value[1]} onChange={e => onChange([min, +e.target.value])} className="w-full accent-[var(--primary)]" />
+      <div className="relative h-5 flex items-center">
+        <input type="range" min={min} max={max} value={value[0]} onChange={e => onChange([Math.min(+e.target.value, value[1]), value[1]])} className="absolute inset-0 w-full accent-[var(--primary)] pointer-events-auto" aria-label="Minimum price" />
+        <input type="range" min={min} max={max} value={value[1]} onChange={e => onChange([value[0], Math.max(+e.target.value, value[0])])} className="absolute inset-0 w-full accent-[var(--primary)] pointer-events-auto" aria-label="Maximum price" />
       </div>
       <div className="flex justify-between text-xs text-[var(--muted-foreground)]">
         <span>${value[0]}</span><span>${value[1]}</span>

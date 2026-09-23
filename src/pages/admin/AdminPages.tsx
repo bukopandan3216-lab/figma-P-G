@@ -184,7 +184,8 @@ export function AdminCustomers() {
   const [view, setView] = useState<'list' | 'profile'>('list');
   const [selected, setSelected] = useState<any>(null);
   const [customerList, setCustomerList] = useState<any[]>([]);
-  useEffect(() => { void fetchCustomers().then(setCustomerList).catch(() => setCustomerList([])); }, []);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { void fetchCustomers().then(rows => { setCustomerList(rows); setError(null); }).catch(cause => setError(cause instanceof Error ? cause.message : 'Unable to load customers.')); }, []);
 
   if (view === 'profile' && selected) return (
     <AdminSidebar>
@@ -207,17 +208,22 @@ export function AdminCustomers() {
             <div className="mt-4">
               <div className="text-xs font-semibold text-[var(--muted-foreground)] uppercase mb-2">Skin Profile</div>
               <div className="flex flex-wrap gap-1.5">
-                {['Combination Skin', 'Anti-Aging', 'Dark Spots'].map(tag => <Badge key={tag} variant="muted">{tag}</Badge>)}
+                {Object.entries(selected.skinProfile || {}).length > 0
+                  ? Object.entries(selected.skinProfile).map(([key, value]) => <Badge key={key} variant="muted">{key}: {String(value)}</Badge>)
+                  : <span className="text-xs text-[var(--muted-foreground)]">No skin profile recorded.</span>}
               </div>
             </div>
           </div>
           <div className="lg:col-span-2 bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-6">
             <h3 className="font-semibold mb-4">Purchase History</h3>
             <DataTable
-              data={[
-                { order: 'PGB-2026-08841', date: 'Sept 18, 2026', items: 3, total: '₱42.47', status: 'Delivered' },
-                { order: 'PGB-2026-07203', date: 'Aug 30, 2026', items: 1, total: '₱28.99', status: 'Delivered' },
-              ] as any}
+              data={(selected.orderHistory || []).map((order: any) => ({
+                order: order.order_no || order.id,
+                date: new Date(order.created_at).toLocaleDateString(),
+                items: 'See order',
+                total: `₱${Number(order.total_amount || 0).toFixed(2)}`,
+                status: order.status,
+              })) as any}
               columns={[
                 { key: 'order', label: 'Order ID' },
                 { key: 'date', label: 'Date' },
@@ -238,6 +244,7 @@ export function AdminCustomers() {
         <div className="flex items-center justify-between">
           <div><h1 className="text-xl font-bold">Customers</h1><p className="text-sm text-[var(--muted-foreground)]">{customerList.length} registered customers</p></div>
         </div>
+        {error && <div className="rounded-[var(--radius)] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">Customer data error: {error}</div>}
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <DataTable
             data={customerList as any}
@@ -1348,10 +1355,15 @@ export function AdminLogin() {
     e.preventDefault();
     if (!email || !password) { setError('Please enter email and password.'); return; }
     setLoading(true); setError('');
-    const result = await login(email, password, 'admin');
-    setLoading(false);
-    if (result.ok) navigate('/admin/dashboard');
-    else setError(result.error || 'Login failed. Check your admin credentials.');
+    try {
+      const result = await login(email, password, 'admin');
+      if (result.ok) navigate('/admin/dashboard');
+      else setError(result.error || 'Login failed. Check your admin credentials.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Login failed. Check your admin credentials.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

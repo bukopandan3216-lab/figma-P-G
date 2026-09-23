@@ -18,7 +18,7 @@ export default function CustomerNav() {
   const navLinks = [
     { label: 'Skin Care', href: '/category/skin-care' },
     { label: 'Hair Care', href: '/category/hair-care' },
-    { label: 'Body Care', href: '/category/body-care' },
+    { label: 'Personal & Body Care', href: '/category/personal-body-care' },
     { label: 'For You', href: '/for-you' },
   ];
 

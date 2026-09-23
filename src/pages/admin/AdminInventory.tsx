@@ -33,8 +33,10 @@ interface StockRow {
   image: string;
   variantCount: number;
   variantRows: VariantStockRow[];
+  isOutOfStock: boolean;
+  isLowStock: boolean;
 }
-interface Movement { id: string; movementNo: string; product: string; type: 'Stock In' | 'Stock Out'; qty: number; date: string; ref: string; }
+interface Movement { id: string; movementNo: string; product: string; type: 'Stock In' | 'Stock Out'; qty: number; currentStock: number | null; date: string; ref: string; }
 
 // `inventory.variant_id` is UNIQUE, so PostgREST treats product_variants →
 // inventory as a one-to-one relationship and embeds it as a single object,
@@ -102,6 +104,14 @@ export default function AdminInventory() {
         reorderLevel: maxReorder,
         image: p.image,
         variantCount: variantRows.length,
+        isOutOfStock: variantRows.every((variant: any) => {
+          const inv = toOne<{ stock_quantity: number }>(variant.inventory);
+          return Number(inv?.stock_quantity || 0) === 0;
+        }),
+        isLowStock: variantRows.some((variant: any) => {
+          const inv = toOne<{ stock_quantity: number; reorder_level: number }>(variant.inventory);
+          return Number(inv?.stock_quantity || 0) > 0 && Number(inv?.stock_quantity || 0) < Number(inv?.reorder_level || 10);
+        }),
         variantRows: variantRows.map((v: any) => {
           const inv = toOne<{ id: string; stock_quantity: number; reorder_level: number }>(v.inventory);
           return {
@@ -119,18 +129,20 @@ export default function AdminInventory() {
   };
 
   const loadMovements = async () => {
-    const { data } = await supabase
+    const { data, error: movementError } = await supabase
       .from('inventory_movements')
-      .select('id, movement_no, variant_id, movement_type, quantity, reference, created_at, product_variants(size, scent, products(name))')
+      .select('id, movement_no, variant_id, movement_type, quantity, reference, created_at, product_variants(size, scent, products(name), inventory(stock_quantity))')
       .order('created_at', { ascending: false })
       .limit(30);
 
+    if (movementError) { setError(movementError.message); return; }
     setMovements((data || []).map((row: any) => ({
       id: row.id,
       movementNo: row.movement_no || row.id.slice(0, 8),
       product: row.product_variants?.products?.name || row.variant_id,
       type: row.movement_type,
       qty: row.quantity,
+      currentStock: toOne<{ stock_quantity: number }>(row.product_variants?.inventory)?.stock_quantity ?? null,
       date: new Date(row.created_at).toLocaleDateString(),
       ref: row.reference || '',
     })));
@@ -154,42 +166,56 @@ export default function AdminInventory() {
 
   const modalInventoryOptions = inventory
     .filter(item => selectedCategory === 'All' || item.category === selectedCategory)
-    .map(item => ({
-      value: item.inventoryId,
-      label: `${item.category} · ${item.product} · ${item.variantLabel} (${item.stock} in stock)`,
-    }));
+    .flatMap(item => item.variantRows.map(variant => ({
+      value: variant.inventoryId,
+      label: `${item.category} · ${item.product} · ${variant.variantLabel} (${variant.stock} in stock)`,
+    })));
 
   const submit = () => {
     const qty = parseInt(form.qty);
     if (!form.inventoryId) { addToast('error', 'Select a product.'); return; }
     if (!qty || qty <= 0) { addToast('error', 'Enter a valid quantity.'); return; }
 
-    const row = inventory.find(i => i.inventoryId === form.inventoryId);
-    if (!row) return;
+    const parentRow = inventory.find(i => i.variantRows.some(variant => variant.inventoryId === form.inventoryId));
+    const variantRow = parentRow?.variantRows.find(variant => variant.inventoryId === form.inventoryId);
+    if (!parentRow || !variantRow) return;
 
-    if (modalType === 'out' && qty > row.stock) {
-      addToast('error', `Cannot remove ${qty} units. Only ${row.stock} in stock.`); return;
+    if (modalType === 'out' && qty > variantRow.stock) {
+      addToast('error', `Cannot remove ${qty} units. Only ${variantRow.stock} in stock.`); return;
     }
 
     void (async () => {
-      const nextStock = modalType === 'in' ? row.stock + qty : row.stock - qty;
-      // Update the exact variant's inventory row — never an aggregate.
-      const { error: stockError } = await supabase.from('inventory').update({ stock_quantity: nextStock, updated_at: new Date().toISOString() }).eq('id', row.inventoryId);
-      if (stockError) { addToast('error', stockError.message); return; }
-      const { error: movementError } = await supabase.from('inventory_movements').insert({ variant_id: row.variantId, movement_type: modalType === 'in' ? 'Stock In' : 'Stock Out', quantity: qty, reference: form.ref || null, notes: form.notes || null });
+      const { error: movementError } = await supabase.rpc('record_inventory_movement', {
+        p_inventory_id: variantRow.inventoryId,
+        p_movement_type: modalType === 'in' ? 'Stock In' : 'Stock Out',
+        p_quantity: qty,
+        p_reference: form.ref || null,
+        p_notes: form.notes || null,
+      });
       if (movementError) { addToast('error', movementError.message); return; }
-      addToast('success', `${modalType === 'in' ? 'Stock added' : 'Stock removed'}: ${qty} units of ${row.product} (${row.variantLabel})`);
+      addToast('success', `${modalType === 'in' ? 'Stock added' : 'Stock removed'}: ${qty} units of ${parentRow.product} (${variantRow.variantLabel})`);
       setModalOpen(false);
       await Promise.all([loadInventory(), loadMovements()]);
     })();
   };
 
-  const lowStockCount = inventory.filter(i => i.stock > 0 && i.stock < i.reorderLevel).length;
-  const outCount = inventory.filter(i => i.stock === 0).length;
-  const inStockCount = inventory.filter(i => i.stock > 0 && i.stock >= i.reorderLevel).length;
+  const lowStockCount = inventory.filter(i => i.isLowStock && !i.isOutOfStock).length;
+  const outCount = inventory.filter(i => i.isOutOfStock).length;
+  const inStockCount = inventory.filter(i => !i.isOutOfStock && !i.isLowStock).length;
   const totalProducts = inventory.length;
   const totalUnits = inventory.reduce((sum, item) => sum + item.stock, 0);
   const filteredInventory = inventory.filter(item => selectedCategory === 'All' || item.category === selectedCategory);
+  const displayInventory = filteredInventory.flatMap(item => item.variantRows.map(variant => ({
+    ...item,
+    inventoryId: variant.inventoryId,
+    variantId: variant.variantId,
+    variantLabel: variant.variantLabel,
+    stock: variant.stock,
+    reorderLevel: variant.reorderLevel,
+    variantCount: 1,
+    isOutOfStock: variant.stock === 0,
+    isLowStock: variant.stock > 0 && variant.stock < variant.reorderLevel,
+  })));
 
   return (
     <AdminSidebar>
@@ -261,7 +287,14 @@ export default function AdminInventory() {
           </div>
 
           <DataTable
-            data={filteredInventory.map(i => ({ ...i, _status: getStatus(i.stock, i.reorderLevel) })) as any}
+            data={displayInventory.map(i => ({
+              ...i,
+              _status: i.isOutOfStock
+                ? { label: 'Out of Stock', variant: 'danger' as const }
+                : i.isLowStock
+                  ? { label: 'Low Stock', variant: 'warning' as const }
+                  : { label: 'In Stock', variant: 'success' as const },
+            })) as any}
             columns={[
               { key: 'product', label: 'Product', render: (row: any) => (
                 <div className="flex items-center gap-3">
@@ -273,7 +306,7 @@ export default function AdminInventory() {
                 </div>
               )},
               { key: 'category', label: 'Category' },
-              { key: 'variantCount', label: 'Variants', render: (row: any) => <span className="text-sm text-[var(--muted-foreground)]">{row.variantCount}</span> },
+              { key: 'variantLabel', label: 'Variant', render: (row: any) => <span className="text-sm text-[var(--muted-foreground)]">{row.variantLabel}</span> },
               { key: 'stock', label: 'Current Stock', render: (row: any) => (
                 <div className="flex flex-col gap-1 min-w-24">
                   <span className="font-mono text-sm font-medium">{row.stock} units</span>
@@ -292,7 +325,7 @@ export default function AdminInventory() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[var(--border)]">
-                  {['Reference', 'Product', 'Type', 'Quantity', 'Date', 'Document'].map(h => (
+                  {['Reference', 'Product', 'Type', 'Quantity', 'Current Stock', 'Date', 'Document'].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
@@ -308,12 +341,13 @@ export default function AdminInventory() {
                       </div>
                     </td>
                     <td className="px-3 py-3 font-mono">{m.type === 'Stock Out' ? '-' : '+'}{m.qty}</td>
+                    <td className="px-3 py-3 font-mono">{m.currentStock == null ? '—' : `${m.currentStock} units`}</td>
                     <td className="px-3 py-3 text-[var(--muted-foreground)] text-xs">{m.date}</td>
                     <td className="px-3 py-3 text-xs text-[var(--primary)] font-mono">{m.ref}</td>
                   </tr>
                 ))}
                 {movements.length === 0 && (
-                  <tr><td colSpan={6} className="px-3 py-6 text-center text-xs text-[var(--muted-foreground)]">No stock movements recorded yet.</td></tr>
+                  <tr><td colSpan={7} className="px-3 py-6 text-center text-xs text-[var(--muted-foreground)]">No stock movements recorded yet.</td></tr>
                 )}
               </tbody>
             </table>
@@ -329,7 +363,7 @@ export default function AdminInventory() {
                 const nextCategory = e.target.value;
                 setSelectedCategory(nextCategory);
                 const firstItem = inventory.find(item => nextCategory === 'All' ? true : item.category === nextCategory);
-                setForm((prev) => ({ ...prev, inventoryId: firstItem ? firstItem.inventoryId : '' }));
+                setForm((prev) => ({ ...prev, inventoryId: firstItem?.variantRows[0]?.inventoryId || '' }));
               }}
               options={[{ value: 'All', label: 'All categories' }, ...categoryOptions]}
             />

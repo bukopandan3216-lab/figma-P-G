@@ -34,7 +34,7 @@ function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Pr
         )}
         <button
           onClick={e => { e.stopPropagation(); toggleWishlist(product.id); }}
-          className="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm opacity-0 group-hover:opacity-100 transition-all hover:bg-white"
+          className={`absolute top-3 right-3 w-8 h-8 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm transition-all hover:bg-white ${wished ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill={wished ? '#B5697A' : 'none'} stroke="#B5697A" strokeWidth="2">
             <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
@@ -226,7 +226,7 @@ export default function HomePage() {
       <footer className="border-t border-border bg-white py-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 grid grid-cols-2 md:grid-cols-4 gap-8 text-sm">
           {[
-            { title: 'Shop', links: ['Skin Care', 'Hair Care', 'Body Care', 'Personal Care'] },
+            { title: 'Shop', links: ['Skin Care', 'Hair Care', 'Personal & Body Care'] },
             { title: 'Account', links: ['Login', 'Register', 'Orders', 'Wishlist'] },
             { title: 'Help', links: ['Contact Us', 'Shipping Policy', 'Returns', 'FAQ'] },
             { title: 'Company', links: ['About P&G', 'Sustainability', 'Careers', 'Press'] },

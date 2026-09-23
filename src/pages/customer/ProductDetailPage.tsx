@@ -1,5 +1,5 @@
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ShoppingBag, Heart, ChevronLeft, ChevronRight, Star, Check, Truck, Shield, RotateCcw } from 'lucide-react';
 import { useCatalog } from '../../context/CatalogContext';
@@ -12,6 +12,7 @@ export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { products, loading, error } = useCatalog();
   const product = products.find(p => p.id === id);
+  useEffect(() => { window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior }); }, [id]);
   const [activeImg, setActiveImg] = useState(0);
   const [selectedVariants, setSelectedVariants] = useState<Record<string, string>>({});
   const [tab, setTab] = useState('Description');

@@ -96,13 +96,21 @@ export async function fetchCategories(): Promise<CatalogCategory[]> {
     .order('name');
   if (error) throw error;
 
-  return (data || []).map((row: any) => ({
-    id: row.name.toLowerCase().replace(/\s+/g, '-'),
-    name: row.name,
-    description: row.description || '',
-    image: row.image || '',
-    count: row.products?.[0]?.count || 0,
-  }));
+  const merged = new Map<string, CatalogCategory>();
+  (data || []).forEach((row: any) => {
+    if (row.name === 'Oral Care') return;
+    const isPersonalBody = row.name === 'Personal Care' || row.name === 'Body Care';
+    const key = isPersonalBody ? 'personal-body-care' : row.name.toLowerCase().replace(/\s+/g, '-');
+    const current = merged.get(key);
+    merged.set(key, {
+      id: key,
+      name: isPersonalBody ? 'Personal & Body Care' : row.name,
+      description: isPersonalBody ? 'Daily body, deodorant, shaving, and personal care essentials' : row.description || '',
+      image: current?.image || row.image || '',
+      count: (current?.count || 0) + (row.products?.[0]?.count || 0),
+    });
+  });
+  return Array.from(merged.values());
 }
 
 export async function createOrder(input: {

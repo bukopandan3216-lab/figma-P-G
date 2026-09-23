@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Sparkles, ArrowRight, Brain } from 'lucide-react';
 import { useCatalog } from '../../context/CatalogContext';
 import { useAuth } from '../../context/AuthContext';
@@ -16,6 +16,7 @@ const reasons = [
 ];
 
 export default function ForYouPage() {
+  const navigate = useNavigate();
   const { addToCart, wishlist, toggleWishlist } = useCart();
   const { products, loading, error } = useCatalog();
   const { user } = useAuth();
@@ -96,20 +97,27 @@ export default function ForYouPage() {
           <h2 className="font-display text-2xl mb-6">More Recommendations</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {forYou.slice(1).map((product, idx) => (
-              <div key={product.id} className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300">
+              <div
+                key={product.id}
+                role="link"
+                tabIndex={0}
+                onClick={() => navigate(`/product/${product.id}`)}
+                onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); navigate(`/product/${product.id}`); } }}
+                className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300 cursor-pointer"
+              >
                 <div className="relative aspect-square overflow-hidden bg-[var(--secondary)]">
                   <img src={product.image} alt={product.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                   <div className="absolute top-2 left-2"><Badge variant="rose" className="text-[10px]">{95 - idx * 3}% Match</Badge></div>
                 </div>
                 <div className="p-3">
                   <div className="text-[10px] text-[var(--muted-foreground)] mb-0.5">{product.brand}</div>
-                  <Link to={`/product/${product.id}`} className="text-sm font-semibold text-[var(--foreground)] line-clamp-2 hover:text-[var(--primary)] transition-colors leading-snug">{product.name}</Link>
+                  <span className="text-sm font-semibold text-[var(--foreground)] line-clamp-2 group-hover:text-[var(--primary)] transition-colors leading-snug">{product.name}</span>
                   <div className="flex items-center gap-1 mt-1">
                     <StarRating rating={product.rating} />
                   </div>
                   <div className="flex items-center justify-between mt-2">
                     <span className="text-sm font-bold">${product.price.toFixed(2)}</span>
-                    <Button size="sm" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })} disabled={!product.inStock} className="text-xs px-2.5">Add</Button>
+                    <Button size="sm" onClick={event => { event.stopPropagation(); addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock }); }} disabled={!product.inStock} className="text-xs px-2.5">Add</Button>
                   </div>
                 </div>
               </div>

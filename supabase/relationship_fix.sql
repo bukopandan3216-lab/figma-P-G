@@ -37,6 +37,9 @@ create policy own_cart_items on public.cart_items for all using (user_id = auth.
 drop policy if exists own_wishlist_items on public.wishlist_items;
 create policy own_wishlist_items on public.wishlist_items for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on public.cart_items, public.wishlist_items to authenticated;
+
 update public.purchase_orders
 set created_by = admin_profile.id
 from (

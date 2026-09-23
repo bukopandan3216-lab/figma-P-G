@@ -287,6 +287,12 @@ export function AccountPage() {
 function ProfileSection({ user, updateUser, addToast }: any) {
   const [form, setForm] = useState({ firstName: user?.firstName || '', lastName: user?.lastName || '', email: user?.email || '', phone: user?.phone || '', birthday: user?.birthday || '' });
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, [k]: e.target.value }));
+  const [birthdayYear, birthdayMonth, birthdayDay] = form.birthday ? form.birthday.split('-') : ['', '', ''];
+  const years = Array.from({ length: new Date().getFullYear() - 1919 }, (_, index) => String(new Date().getFullYear() - index));
+  const updateBirthday = (part: 'year' | 'month' | 'day', value: string) => {
+    const next = { year: birthdayYear, month: birthdayMonth, day: birthdayDay, [part]: value };
+    setForm(previous => ({ ...previous, birthday: next.year && next.month && next.day ? `${next.year}-${next.month.padStart(2, '0')}-${next.day.padStart(2, '0')}` : '' }));
+  };
 
   const save = async () => {
     try {
@@ -311,7 +317,23 @@ function ProfileSection({ user, updateUser, addToast }: any) {
         <Input label="Last Name" value={form.lastName} onChange={set('lastName')} />
         <Input label="Email" type="email" value={form.email} disabled className="col-span-2 opacity-60" />
         <Input label="Phone" value={form.phone} onChange={set('phone')} placeholder="+63 912 345 6789" />
-        <Input label="Birthday" type="date" value={form.birthday} onChange={set('birthday')} />
+        <div className="col-span-2">
+          <label className="text-sm font-medium block mb-1.5">Birthday</label>
+          <div className="grid grid-cols-3 gap-2">
+            <select aria-label="Birth month" value={birthdayMonth} onChange={event => updateBirthday('month', event.target.value)} className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-white px-3 py-2 text-sm">
+              <option value="">Month</option>
+              {Array.from({ length: 12 }, (_, index) => { const value = String(index + 1).padStart(2, '0'); return <option key={value} value={value}>{new Date(2000, index).toLocaleString('en', { month: 'long' })}</option>; })}
+            </select>
+            <select aria-label="Birth day" value={birthdayDay} onChange={event => updateBirthday('day', event.target.value)} className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-white px-3 py-2 text-sm">
+              <option value="">Day</option>
+              {Array.from({ length: 31 }, (_, index) => { const value = String(index + 1).padStart(2, '0'); return <option key={value} value={value}>{index + 1}</option>; })}
+            </select>
+            <select aria-label="Birth year" value={birthdayYear} onChange={event => updateBirthday('year', event.target.value)} className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-white px-3 py-2 text-sm">
+              <option value="">Year</option>
+              {years.map(year => <option key={year} value={year}>{year}</option>)}
+            </select>
+          </div>
+        </div>
       </div>
       <Button className="mt-6" onClick={save}>Save Changes</Button>
     </div>
@@ -449,31 +471,59 @@ function persistAddresses(addresses: Address[]) {
 }
 
 function AddressesSection({ addToast }: any) {
-  const [addresses, setAddresses] = useState<Address[]>(() => readStoredAddresses());
+  const { user } = useAuth();
+  const [addresses, setAddresses] = useState<Address[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editAddr, setEditAddr] = useState<Address | null>(null);
   const [form, setForm] = useState({ label: 'Home', name: '', line1: '', city: '', zip: '', phone: '' });
 
   useEffect(() => {
-    persistAddresses(addresses);
-  }, [addresses]);
+    if (!user) return;
+    void supabase.from('user_addresses').select('id, label, full_name, line1, city, zip, phone, is_default').eq('user_id', user.id).order('created_at').then(({ data, error }) => {
+      if (error) { addToast('error', error.message); return; }
+      setAddresses((data || []).map((address: any) => ({
+        id: address.id,
+        label: address.label,
+        name: address.full_name,
+        line1: address.line1,
+        city: address.city,
+        zip: address.zip,
+        phone: address.phone || '',
+        isDefault: address.is_default,
+      })));
+    });
+  }, [user?.id]);
 
   const openAdd = () => { setEditAddr(null); setForm({ label: 'Home', name: '', line1: '', city: '', zip: '', phone: '' }); setModalOpen(true); };
   const openEdit = (a: Address) => { setEditAddr(a); setForm({ label: a.label, name: a.name, line1: a.line1, city: a.city, zip: a.zip, phone: a.phone }); setModalOpen(true); };
 
-  const save = () => {
-    if (editAddr) {
-      setAddresses(prev => prev.map(a => a.id === editAddr.id ? { ...a, ...form } : a));
-      addToast('success', 'Address updated!');
-    } else {
-      setAddresses(prev => [...prev, { id: `a${Date.now()}`, ...form, isDefault: prev.length === 0 }]);
-      addToast('success', 'Address added!');
-    }
+  const save = async () => {
+    if (!user) return;
+    const isDefault = editAddr ? editAddr.isDefault : addresses.length === 0;
+    const payload = { user_id: user.id, label: form.label, full_name: form.name, line1: form.line1, city: form.city, zip: form.zip, phone: form.phone, is_default: isDefault };
+    const { data, error } = editAddr
+      ? await supabase.from('user_addresses').update(payload).eq('id', editAddr.id).eq('user_id', user.id).select().single()
+      : await supabase.from('user_addresses').insert(payload).select().single();
+    if (error) { addToast('error', error.message); return; }
+    if (isDefault) await supabase.from('user_addresses').update({ is_default: false }).eq('user_id', user.id).neq('id', data.id);
+    const nextAddress = { id: data.id, label: data.label, name: data.full_name, line1: data.line1, city: data.city, zip: data.zip, phone: data.phone || '', isDefault: data.is_default };
+    setAddresses(prev => editAddr ? prev.map(address => address.id === editAddr.id ? nextAddress : (isDefault ? { ...address, isDefault: false } : address)) : [...prev.map(address => isDefault ? { ...address, isDefault: false } : address), nextAddress]);
+    addToast('success', editAddr ? 'Address updated!' : 'Address added!');
     setModalOpen(false);
   };
 
-  const remove = (id: string) => { setAddresses(prev => prev.filter(a => a.id !== id)); addToast('info', 'Address removed.'); };
-  const setDefault = (id: string) => setAddresses(prev => prev.map(a => ({ ...a, isDefault: a.id === id })));
+  const remove = async (id: string) => {
+    const { error } = await supabase.from('user_addresses').delete().eq('id', id).eq('user_id', user?.id);
+    if (error) { addToast('error', error.message); return; }
+    setAddresses(prev => prev.filter(a => a.id !== id)); addToast('info', 'Address removed.');
+  };
+  const setDefault = async (id: string) => {
+    if (!user) return;
+    const { error: clearError } = await supabase.from('user_addresses').update({ is_default: false }).eq('user_id', user.id);
+    const { error } = clearError ? { error: clearError } : await supabase.from('user_addresses').update({ is_default: true }).eq('id', id).eq('user_id', user.id);
+    if (error) { addToast('error', error.message); return; }
+    setAddresses(prev => prev.map(a => ({ ...a, isDefault: a.id === id }))); addToast('success', 'Default address updated.');
+  };
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm(p => ({ ...p, [k]: e.target.value }));
 
   return (
@@ -566,14 +616,25 @@ function persistPaymentMethods(methods: PaymentMethod[]) {
 }
 
 function PaymentSection({ addToast }: any) {
-  const [methods, setMethods] = useState<PaymentMethod[]>(() => readStoredPaymentMethods());
+  const { user } = useAuth();
+  const [methods, setMethods] = useState<PaymentMethod[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [addType, setAddType] = useState<PaymentType>('gcash');
   const [form, setForm] = useState({ phone: '', cardName: '', cardNumber: '', expiry: '', cvv: '' });
 
   useEffect(() => {
-    persistPaymentMethods(methods);
-  }, [methods]);
+    if (!user) return;
+    void supabase.from('user_payment_methods').select('id, method_type, label, detail, is_default').eq('user_id', user.id).order('created_at').then(({ data, error }) => {
+      if (error) { addToast('error', error.message); return; }
+      setMethods((data || []).map((method: any) => ({
+        id: method.id,
+        type: method.method_type,
+        label: method.label,
+        detail: method.detail || '',
+        isDefault: method.is_default,
+      })));
+    });
+  }, [user?.id]);
 
   const paymentIcons: Record<PaymentType, string> = {
     gcash: '💙', paymaya: '💚', credit: '💳', debit: '🏧'
@@ -585,16 +646,36 @@ function PaymentSection({ addToast }: any) {
     debit: 'bg-slate-50 text-slate-600 border-slate-200',
   };
 
-  const remove = (id: string) => { setMethods(prev => prev.filter(m => m.id !== id)); addToast('info', 'Payment method removed.'); };
-  const setDefault = (id: string) => setMethods(prev => prev.map(m => ({ ...m, isDefault: m.id === id })));
+  const remove = async (id: string) => {
+    const { error } = await supabase.from('user_payment_methods').delete().eq('id', id).eq('user_id', user?.id);
+    if (error) { addToast('error', error.message); return; }
+    setMethods(prev => prev.filter(m => m.id !== id)); addToast('info', 'Payment method removed.');
+  };
+  const setDefault = async (id: string) => {
+    if (!user) return;
+    const { error: clearError } = await supabase.from('user_payment_methods').update({ is_default: false }).eq('user_id', user.id);
+    const { error } = clearError ? { error: clearError } : await supabase.from('user_payment_methods').update({ is_default: true }).eq('id', id).eq('user_id', user.id);
+    if (error) { addToast('error', error.message); return; }
+    setMethods(prev => prev.map(m => ({ ...m, isDefault: m.id === id })));
+  };
 
-  const addMethod = () => {
+  const addMethod = async () => {
+    if (!user) return;
     let label = '', detail = '';
     if (addType === 'gcash') { label = 'GCash'; detail = form.phone; }
     else if (addType === 'paymaya') { label = 'PayMaya'; detail = form.phone; }
     else if (addType === 'credit') { label = `Visa ending in ${form.cardNumber.slice(-4) || '0000'}`; detail = `Expires ${form.expiry}`; }
     else { label = `Debit ending in ${form.cardNumber.slice(-4) || '0000'}`; detail = `Expires ${form.expiry}`; }
-    setMethods(prev => [...prev, { id: `pm${Date.now()}`, type: addType, label, detail, isDefault: prev.length === 0 }]);
+    const { data, error } = await supabase.from('user_payment_methods').insert({
+      user_id: user.id,
+      method_type: addType,
+      label,
+      detail,
+      is_default: methods.length === 0,
+    }).select().single();
+    if (error) { addToast('error', error.message); return; }
+    if (methods.length === 0) setMethods([{ id: data.id, type: data.method_type, label: data.label, detail: data.detail, isDefault: true }]);
+    else setMethods(prev => [...prev, { id: data.id, type: data.method_type, label: data.label, detail: data.detail, isDefault: false }]);
     addToast('success', 'Payment method added!');
     setModalOpen(false);
     setForm({ phone: '', cardName: '', cardNumber: '', expiry: '', cvv: '' });
