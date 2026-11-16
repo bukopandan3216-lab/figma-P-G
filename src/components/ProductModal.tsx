@@ -1,5 +1,6 @@
 
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { X, Heart, ShoppingBag, Star, ChevronLeft, ChevronRight, Truck, Check, ChevronDown } from 'lucide-react';
 import { useCart } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
@@ -7,32 +8,33 @@ import type { Product } from '../data/products';
 import { useCatalog } from '../context/CatalogContext';
 import { Badge, StarRating, Button } from './ui';
 import { safeImage } from '../lib/image';
+import { supabase } from '../lib/supabase';
 
 interface Props {
   product: Product | null;
   onClose: () => void;
 }
 
-const reviewsData = [
-  { name: 'Lori Barnett', rating: 5, date: '02 May', text: 'Absolutely love this product! It has transformed my skin routine completely. Would 100% recommend to everyone.' },
-  { name: 'Philip Douglas', rating: 4, date: '29 April', text: 'The Scandinavian-inspired design is both subtle and effective. Great value for the quality you get.' },
-  { name: 'Sarah M.', rating: 5, date: '15 April', text: 'This moisturizer has completely transformed my skin. I noticed a visible difference in just 2 weeks!' },
-];
-
-const ratingBreakdown = [
-  { stars: 5, count: 2227, label: '★★★★★' },
-  { stars: 4, count: 502, label: '★★★★' },
-  { stars: 3, count: 33, label: '★★★' },
-  { stars: 2, count: 12, label: '★★' },
-  { stars: 1, count: 8, label: '★' },
-];
+interface ProductReview {
+  id: string;
+  rating: number;
+  review: string;
+  created_at: string;
+}
 
 export default function ProductModal({ product, onClose }: Props) {
   const [activeImg, setActiveImg] = useState(0);
   const [selectedVariants, setSelectedVariants] = useState<Record<string, string>>({});
   const [qty, setQty] = useState(1);
   const [showFullDesc, setShowFullDesc] = useState(false);
-  const [activeReviewFilter, setActiveReviewFilter] = useState('All');
+  const [activeReviewFilter, setActiveReviewFilter] = useState<'All' | number>('All');
+  const [reviews, setReviews] = useState<ProductReview[]>([]);
+  const [reviewsLoading, setReviewsLoading] = useState(true);
+  const [reviewError, setReviewError] = useState('');
+  const [reviewNotice, setReviewNotice] = useState('');
+  const [reviewText, setReviewText] = useState('');
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewSaving, setReviewSaving] = useState(false);
   const { addToCart, wishlist, toggleWishlist } = useCart();
   const { user } = useAuth();
   const { products } = useCatalog();
@@ -44,6 +46,36 @@ export default function ProductModal({ product, onClose }: Props) {
     setSelectedVariants({});
     setQty(1);
     setShowFullDesc(false);
+    setActiveReviewFilter('All');
+    setReviewText('');
+    setReviewRating(5);
+    setReviewNotice('');
+  }, [product?.id]);
+
+  useEffect(() => {
+    if (!product) return;
+    let active = true;
+    setReviewsLoading(true);
+    setReviewError('');
+    setReviews([]);
+
+    void supabase.from('product_reviews')
+      .select('id:review_id, rating, review, created_at')
+      .eq('product_id', product.id)
+      .order('created_at', { ascending: false })
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (error) setReviewError('Reviews are temporarily unavailable. Please try again later.');
+        else setReviews((data || []) as ProductReview[]);
+        setReviewsLoading(false);
+      }, () => {
+        if (active) {
+          setReviewError('Reviews are temporarily unavailable. Please try again later.');
+          setReviewsLoading(false);
+        }
+      });
+
+    return () => { active = false; };
   }, [product?.id]);
 
   useEffect(() => {
@@ -64,7 +96,45 @@ export default function ProductModal({ product, onClose }: Props) {
   const imgs = (product.images?.length ? product.images.filter(Boolean) : [product.image]).filter(Boolean);
   const safeImgs = imgs.length ? imgs.map(img => safeImage(img, product.name)) : [safeImage(product.image, product.name)];
   const wished = wishlist.includes(product.id);
-  const totalReviews = ratingBreakdown.reduce((s, r) => s + r.count, 0);
+  const averageReviewRating = reviews.length
+    ? reviews.reduce((total, review) => total + review.rating, 0) / reviews.length
+    : 0;
+  const ratingBreakdown = [5, 4, 3, 2, 1].map(stars => ({
+    stars,
+    count: reviews.filter(review => review.rating === stars).length,
+    label: '★'.repeat(stars),
+  }));
+  const visibleReviews = reviews.filter(review => activeReviewFilter === 'All' || review.rating === activeReviewFilter);
+
+  const submitReview = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!product || !user?.id) return;
+    setReviewSaving(true);
+    setReviewError('');
+    setReviewNotice('');
+    try {
+      const { error } = await supabase.rpc('submit_product_review', {
+        p_product_id: product.id,
+        p_rating: reviewRating,
+        p_review: reviewText.trim(),
+      });
+      if (error) throw error;
+
+      const { data, error: refreshError } = await supabase.from('product_reviews')
+        .select('id:review_id, rating, review, created_at')
+        .eq('product_id', product.id)
+        .order('created_at', { ascending: false });
+      if (refreshError) throw refreshError;
+
+      setReviews((data || []) as ProductReview[]);
+      setReviewText('');
+      setReviewNotice('Your verified purchase review has been saved.');
+    } catch (cause) {
+      setReviewError(cause instanceof Error ? cause.message : 'Unable to save your review. Please try again.');
+    } finally {
+      setReviewSaving(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6">
@@ -72,11 +142,11 @@ export default function ProductModal({ product, onClose }: Props) {
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
       {/* Modal */}
-      <div className="relative w-full max-w-5xl max-h-[92vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-fade-in">
+      <div className="relative flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border)] bg-white shadow-2xl animate-fade-in">
         {/* Close */}
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 z-10 w-8 h-8 rounded-full bg-white shadow-md flex items-center justify-center text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"
+          className="absolute right-3.5 top-3.5 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-white/95 text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--foreground)] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
         >
           <X size={16} />
         </button>
@@ -125,14 +195,12 @@ export default function ProductModal({ product, onClose }: Props) {
               </p>
 
               {/* Rating */}
-              <div className="flex items-center gap-2 mb-2">
-                <div className="flex">
-                  {Array.from({ length: 5 }, (_, i) => (
-                    <Star key={i} size={14} fill={i < Math.round(product.rating) ? '#F59E0B' : 'none'} stroke="#F59E0B" strokeWidth={1.5} />
-                  ))}
-                </div>
-                <span className="text-sm font-medium text-[var(--foreground)]">{product.rating}</span>
-                <span className="text-xs text-[var(--muted-foreground)]">({product.reviews.toLocaleString()} reviews)</span>
+              <div className="mb-2 flex items-center gap-2">
+                {reviews.length ? <>
+                  <StarRating rating={averageReviewRating} />
+                  <span className="text-sm font-medium text-[var(--foreground)]">{averageReviewRating.toFixed(1)}</span>
+                  <span className="text-xs text-[var(--muted-foreground)]">({reviews.length} reviews)</span>
+                </> : <span className="text-xs text-[var(--muted-foreground)]">{reviewsLoading ? 'Loading reviews…' : 'No reviews yet'}</span>}
               </div>
 
               {/* Name */}
@@ -140,12 +208,12 @@ export default function ProductModal({ product, onClose }: Props) {
 
               {/* Price */}
               <div className="flex items-baseline gap-2 mb-4">
-                <span className="text-3xl font-bold">${product.price.toFixed(2)}</span>
-                {product.originalPrice && (
-                  <span className="text-base text-[var(--muted-foreground)] line-through">${product.originalPrice.toFixed(2)}</span>
+                <span className="text-3xl font-bold">₱{product.price.toFixed(2)}</span>
+                {product.originalPrice != null && (
+                  <span className="text-base text-[var(--muted-foreground)] line-through">₱{product.originalPrice.toFixed(2)}</span>
                 )}
-                {product.originalPrice && (
-                  <Badge variant="danger">Save ${(product.originalPrice - product.price).toFixed(2)}</Badge>
+                {product.originalPrice != null && product.originalPrice > product.price && (
+                  <Badge variant="danger">Save ₱{(product.originalPrice - product.price).toFixed(2)}</Badge>
                 )}
               </div>
 
@@ -196,7 +264,7 @@ export default function ProductModal({ product, onClose }: Props) {
               {/* Delivery */}
               <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)] mb-4 py-3 border-t border-b border-[var(--border)]">
                 <Truck size={14} className="text-[var(--primary)] flex-shrink-0" />
-                <span>Free delivery on orders over $35 · 2–5 business days</span>
+                <span>Free delivery on orders over ₱2,500 · 2–5 business days</span>
               </div>
 
               {/* Stock */}
@@ -239,7 +307,7 @@ export default function ProductModal({ product, onClose }: Props) {
           {similar.length > 0 && (
             <div className="px-5 sm:px-6 py-5 border-t border-[var(--border)]">
               <h3 className="text-sm font-semibold text-[var(--muted-foreground)] uppercase tracking-wide mb-3">Similar items:</h3>
-              <div className="grid grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {similar.map(p => (
                   <button
                     key={p.id}
@@ -253,9 +321,9 @@ export default function ProductModal({ product, onClose }: Props) {
                     className="group text-left"
                   >
                     <div className="aspect-square bg-[var(--secondary)] rounded-xl overflow-hidden mb-2">
-                      <img src={p.image} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                      <img src={safeImage(p.image, p.name)} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
                     </div>
-                    <p className="text-xs font-bold">${p.price.toFixed(2)}</p>
+                    <p className="text-xs font-bold">₱{p.price.toFixed(2)}</p>
                     <p className="text-xs text-[var(--muted-foreground)] line-clamp-1">{p.name}</p>
                   </button>
                 ))}
@@ -269,20 +337,17 @@ export default function ProductModal({ product, onClose }: Props) {
 
             {/* Rating summary */}
             <div className="flex items-start gap-6 mb-5">
-              <div className="text-center flex-shrink-0">
-                <div className="text-5xl font-bold leading-none">{product.rating}</div>
-                <div className="flex justify-center mt-1.5">
-                  {Array.from({ length: 5 }, (_, i) => (
-                    <Star key={i} size={14} fill={i < Math.round(product.rating) ? '#F59E0B' : 'none'} stroke="#F59E0B" strokeWidth={1.5} />
-                  ))}
-                </div>
+              <div className="flex-shrink-0 text-center">
+                <div className="text-5xl font-bold leading-none">{reviews.length ? averageReviewRating.toFixed(1) : '—'}</div>
+                {reviews.length > 0 && <div className="mt-1.5 flex justify-center"><StarRating rating={averageReviewRating} /></div>}
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">{reviews.length} reviews</p>
               </div>
-              <div className="flex-1 flex flex-col gap-1.5">
+              <div className="flex flex-1 flex-col gap-1.5">
                 {ratingBreakdown.map(r => (
                   <div key={r.stars} className="flex items-center gap-2 text-xs">
-                    <span className="text-[var(--muted-foreground)] w-8 text-right flex-shrink-0">{r.label.slice(0, 2)}</span>
+                    <span className="w-8 flex-shrink-0 text-right text-[var(--muted-foreground)]">{r.stars}★</span>
                     <div className="flex-1 h-2 bg-[var(--muted)] rounded-full overflow-hidden">
-                      <div className="h-full bg-amber-400 rounded-full" style={{ width: `${(r.count / totalReviews) * 100}%` }} />
+                      <div className="h-full rounded-full bg-amber-400" style={{ width: `${reviews.length ? (r.count / reviews.length) * 100 : 0}%` }} />
                     </div>
                     <span className="text-[var(--muted-foreground)] w-10 flex-shrink-0">({r.count.toLocaleString()})</span>
                   </div>
@@ -290,46 +355,53 @@ export default function ProductModal({ product, onClose }: Props) {
               </div>
             </div>
 
-            {/* Filter pills */}
-            <div className="flex flex-wrap gap-2 mb-5">
-              {['All', '★★★★★', '★★★★', '★★★', '★★', '★'].map((f, i) => (
-                <button
-                  key={f}
-                  onClick={() => setActiveReviewFilter(f)}
-                  className={`px-3 py-1 rounded-full text-xs border transition-all ${activeReviewFilter === f ? 'bg-[var(--primary)] border-[var(--primary)] text-white' : 'border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--primary)]'}`}
-                >
-                  {f} {i > 0 && <span className="opacity-70">({ratingBreakdown[5 - i]?.count.toLocaleString()})</span>}
-                </button>
-              ))}
-            </div>
+            {reviews.length > 0 && <div className="mb-5 flex flex-wrap gap-2">
+              {(['All', 5, 4, 3, 2, 1] as const).map(filter => {
+                const count = filter === 'All' ? reviews.length : ratingBreakdown.find(row => row.stars === filter)?.count || 0;
+                return <button key={filter} type="button" onClick={() => setActiveReviewFilter(filter)} aria-pressed={activeReviewFilter === filter} className={`rounded-full border px-3 py-1 text-xs transition-colors ${activeReviewFilter === filter ? 'border-[var(--primary)] bg-[var(--primary)] text-white' : 'border-[var(--border)] text-[var(--foreground)] hover:border-[var(--primary)]'}`}>
+                  {filter === 'All' ? 'All' : `${filter} stars`} <span className="opacity-80">({count})</span>
+                </button>;
+              })}
+            </div>}
 
-            {/* Review list */}
-            <div className="flex flex-col gap-5">
-              {reviewsData.map((review, i) => (
-                <div key={i} className="flex gap-3">
-                  <div className="w-9 h-9 rounded-full bg-[var(--primary)]/20 flex items-center justify-center text-xs font-bold text-[var(--primary)] flex-shrink-0 overflow-hidden">
-                    <img
-                      src={`https://images.unsplash.com/photo-${i === 0 ? '1544005313-94ddf0286df2' : '1472099645785-5658abf4ff4e'}?w=80&h=80&fit=crop&auto=format`}
-                      alt={review.name}
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between mb-1">
-                      <div className="flex items-center gap-2">
-                        <div className="flex">
-                          {Array.from({ length: 5 }, (_, j) => (
-                            <Star key={j} size={12} fill={j < review.rating ? '#F59E0B' : 'none'} stroke="#F59E0B" strokeWidth={1.5} />
-                          ))}
+            {reviewsLoading ? <p role="status" className="py-4 text-sm text-[var(--muted-foreground)]">Loading customer reviews…</p>
+              : reviewError ? <p role="alert" className="py-4 text-sm text-red-600">{reviewError}</p>
+                : visibleReviews.length ? <div className="flex flex-col gap-5">
+                  {visibleReviews.map(review => (
+                    <article key={review.id} className="border-t border-[var(--border)] pt-4">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-0.5" aria-label={`${review.rating} out of 5 stars`}>
+                            {Array.from({ length: 5 }, (_, index) => <Star key={index} size={13} fill={index < review.rating ? 'currentColor' : 'none'} className="text-amber-500" aria-hidden="true" />)}
+                          </div>
+                          <span className="text-xs font-semibold">Verified buyer</span>
                         </div>
+                        <time className="text-xs text-[var(--muted-foreground)]" dateTime={review.created_at}>{new Date(review.created_at).toLocaleDateString()}</time>
                       </div>
-                      <span className="text-xs text-[var(--muted-foreground)]">{review.date}</span>
-                    </div>
-                    <div className="text-xs font-semibold mb-1">{review.name}</div>
-                    <p className="text-xs text-[var(--muted-foreground)] leading-relaxed">{review.text}</p>
-                  </div>
+                      <p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--foreground)]">{review.review}</p>
+                    </article>
+                  ))}
                 </div>
-              ))}
+                : <p className="border-t border-[var(--border)] py-5 text-sm text-[var(--muted-foreground)]">{reviews.length ? 'No reviews match this rating.' : 'No customer reviews yet. Be the first to share feedback after a delivered order.'}</p>}
+
+            <div className="mt-6 border-t border-[var(--border)] pt-5">
+              <h4 className="mb-2 text-sm font-semibold">Write a review</h4>
+              {user?.id ? <form onSubmit={event => void submitReview(event)} className="flex flex-col gap-3">
+                <p className="text-xs text-[var(--muted-foreground)]">Reviews are available after your order has been delivered. You can update your existing review.</p>
+                <div className="flex items-center gap-1" role="group" aria-label="Choose a rating">
+                  {Array.from({ length: 5 }, (_, index) => {
+                    const value = index + 1;
+                    return <button key={value} type="button" onClick={() => setReviewRating(value)} aria-label={`${value} star${value === 1 ? '' : 's'}`} aria-pressed={reviewRating === value} className="rounded p-1 text-amber-500 hover:bg-[var(--secondary)] focus-visible:outline-2 focus-visible:outline-[var(--primary)]"><Star size={20} fill={value <= reviewRating ? 'currentColor' : 'none'} /></button>;
+                  })}
+                </div>
+                <textarea required minLength={10} maxLength={1200} value={reviewText} onChange={event => setReviewText(event.target.value)} placeholder="Share your experience (10–1200 characters)" rows={4} className="w-full resize-y rounded-[var(--radius-inner)] border border-[var(--border)] bg-white px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]" />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-xs text-[var(--muted-foreground)]">{reviewText.length}/1200</span>
+                  <Button type="submit" size="sm" loading={reviewSaving} disabled={reviewText.trim().length < 10}>Submit Review</Button>
+                </div>
+                {reviewError && <p role="alert" className="text-sm text-red-600">{reviewError}</p>}
+                {reviewNotice && <p role="status" className="text-sm text-emerald-700">{reviewNotice}</p>}
+              </form> : <p className="text-sm text-[var(--muted-foreground)]"><Link to="/login" className="font-medium text-[var(--primary)] underline">Sign in</Link> to leave a review after your order is delivered.</p>}
             </div>
           </div>
         </div>

@@ -10,10 +10,16 @@ export interface CatalogCategory {
 }
 
 type ProductRow = {
+  status: 'Active' | 'Archived' | 'Draft';
   id: string;
   name: string;
   price: number;
   original_price?: number;
+  sale_price?: number | null;
+  discount_type?: 'percentage' | 'fixed' | null;
+  discount_value?: number | null;
+  discount_start?: string | null;
+  discount_end?: string | null;
   rating: number;
   reviews: number;
   image: string;
@@ -26,16 +32,13 @@ type ProductRow = {
   variants?: { label: string; options: string[] }[];
   brands?: { name: string } | null;
   categories?: { name: string; description: string; image: string } | null;
-  product_variants?: { id: string; label?: string; options?: string[]; size?: string; scent?: string; inventory?: { stock_quantity: number }[] }[];
-  inventory?: { stock_quantity: number } | null;
+  product_variants?: { id: string; label?: string; options?: string[]; size?: string; scent?: string; inventory?: { stock_quantity: number } | { stock_quantity: number }[] | null }[];
+  inventory?: { stock_quantity: number } | { stock_quantity: number }[] | null;
 };
 
-// `inventory.variant_id` is UNIQUE, so PostgREST embeds product_variants →
-// inventory as a single object (one-to-one), not an array. Normalize both
-// shapes so stock totals don't silently come back as 0.
-function toOne<T>(value: T | T[] | null | undefined): T | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value ?? undefined;
+function toMany<T>(value: T | T[] | null | undefined): T[] {
+  if (Array.isArray(value)) return value;
+  return value ? [value] : [];
 }
 
 // A product can have several variant rows (e.g. "Standard" and "Value Size"),
@@ -58,20 +61,41 @@ function buildVariantGroups(
 export async function fetchProducts(): Promise<Product[]> {
   const { data, error } = await supabase
     .from('products')
-    .select('*, brands(name), categories(name), product_variants(id, size, scent, inventory(stock_quantity))')
+    .select('id:product_id, name, description, price, original_price, sale_price, discount_type, discount_value, discount_start, discount_end, rating, reviews, image, images, tags, badge, status, created_at, brands(name), categories(name), product_variants(id:variant_id, size, scent, inventory(stock_quantity))')
     .order('created_at', { ascending: false });
   if (error) throw error;
 
-  return ((data || []) as ProductRow[]).map(row => {
+  return ((data || []) as unknown as ProductRow[]).map(row => {
     const normalizedImages = (Array.isArray(row.images) ? row.images : []).filter((url): url is string => typeof url === 'string' && url.trim() !== '');
     const primaryImage = (typeof row.image === 'string' && row.image.trim() !== '') ? row.image : normalizedImages[0] || '';
-    const totalStock = Number(row.product_variants?.reduce((sum, variant) => sum + Number(toOne(variant.inventory)?.stock_quantity || 0), 0) || 0);
+    const totalStock = Number(row.product_variants?.reduce((sum, variant) =>
+      sum + toMany(variant.inventory).reduce((variantTotal, inventory) => variantTotal + Number(inventory.stock_quantity || 0), 0), 0) || 0);
+
+    // The discounted price lives in products.price; original_price is the
+    // strikethrough. A sale outside its window (not started / already ended but
+    // not yet reverted by expire_discounts) must still read as the full price.
+    const now = Date.now();
+    const startMs = row.discount_start ? new Date(row.discount_start).getTime() : null;
+    const endMs = row.discount_end ? new Date(row.discount_end).getTime() : null;
+    const saleActive = Boolean(row.sale_price != null && row.discount_type)
+      && (startMs === null || startMs <= now)
+      && (endMs === null || endMs > now);
+    const basePrice = row.original_price != null ? Number(row.original_price) : Number(row.price);
+
+    const variantLabels = [...new Set((row.product_variants || [])
+      .map(v => [v.size, v.scent].filter(Boolean).join(' / ').trim())
+      .filter(Boolean))];
 
     return {
       id: row.id,
       name: row.name,
-      price: Number(row.price),
-      originalPrice: row.original_price == null ? undefined : Number(row.original_price),
+      price: saleActive ? Number(row.price) : basePrice,
+      originalPrice: saleActive && row.original_price != null ? Number(row.original_price) : undefined,
+      salePrice: saleActive && row.sale_price != null ? Number(row.sale_price) : null,
+      discountType: saleActive ? (row.discount_type || null) : null,
+      discountValue: saleActive ? (row.discount_value == null ? null : Number(row.discount_value)) : null,
+      discountStart: saleActive ? (row.discount_start || null) : null,
+      discountEnd: saleActive ? (row.discount_end || null) : null,
       rating: Number(row.rating),
       reviews: row.reviews,
       image: primaryImage,
@@ -83,16 +107,31 @@ export async function fetchProducts(): Promise<Product[]> {
       category: row.categories?.name || row.category || '',
       variants: buildVariantGroups(row.product_variants) || row.variants,
       variantId: row.product_variants?.[0]?.id,
+      variantName: variantLabels.length
+        ? (variantLabels.length === 1 ? variantLabels[0] : `${row.product_variants?.length || variantLabels.length} variants`)
+        : undefined,
       stock: totalStock,
       inStock: totalStock > 0 && row.status !== 'Archived',
+      status: row.status,
     };
   });
+}
+
+// Reverts every product whose sale window has ended (price <- original_price)
+// and returns the names that just expired so the admin dashboard can notify.
+// Safe to call repeatedly — it is a no-op when nothing has expired.
+export async function expireEndedDiscounts(): Promise<string[]> {
+  const { data, error } = await supabase.rpc('expire_discounts');
+  if (error) return [];
+  return (Array.isArray(data) ? data : [])
+    .map((row: any) => row?.name)
+    .filter((name: any): name is string => typeof name === 'string' && name.trim() !== '');
 }
 
 export async function fetchCategories(): Promise<CatalogCategory[]> {
   const { data, error } = await supabase
     .from('categories')
-    .select('id, name, description, image, products(count)')
+    .select('category_id, name, description, image, products(count)')
     .order('name');
   if (error) throw error;
 
@@ -113,6 +152,13 @@ export async function fetchCategories(): Promise<CatalogCategory[]> {
   return Array.from(merged.values());
 }
 
+/** Orders at or above this subtotal ship free (₱). */
+export const FREE_SHIPPING_THRESHOLD = 2500;
+/** Standard shipping fee below the free-shipping threshold (₱). */
+export const SHIPPING_FEE = 150;
+/** Philippine VAT rate applied to every order. */
+export const VAT_RATE = 0.12;
+
 export async function createOrder(input: {
   customerId: string;
   items: { productId: string; quantity: number; unitPrice: number; variant?: string }[];
@@ -120,18 +166,18 @@ export async function createOrder(input: {
   paymentMethod: 'card' | 'cash_on_delivery';
 }) {
   const subtotal = input.items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
-  const shippingFee = subtotal >= 35 ? 0 : 4.99;
-  const tax = subtotal * 0.12;
+  const shippingFee = subtotal >= FREE_SHIPPING_THRESHOLD ? 0 : SHIPPING_FEE;
+  const tax = subtotal * VAT_RATE;
   const total = subtotal + shippingFee + tax;
 
   const variantIds = input.items.map(item => item.variant).filter((value): value is string => Boolean(value));
   const { data: variants, error: variantError } = await supabase
     .from('product_variants')
-    .select('id, product_id')
+    .select('variant_id, product_id')
     .in('product_id', input.items.map(item => item.productId));
   if (variantError) throw variantError;
 
-  const fallbackVariantByProduct = new Map((variants || []).map(variant => [variant.product_id, variant.id]));
+  const fallbackVariantByProduct = new Map((variants || []).map(variant => [variant.product_id, variant.variant_id]));
   const requestedVariantIds = input.items.map(item => item.variant ?? fallbackVariantByProduct.get(item.productId)).filter((value): value is string => Boolean(value));
 
   const { data: inventoryRows, error: inventoryError } = await supabase
@@ -178,6 +224,6 @@ export async function createOrder(input: {
   const normalized = Array.isArray(order) ? order[0] : order;
   return {
     ...normalized,
-    order_number: normalized?.order_no || normalized?.order_number || normalized?.id || 'N/A',
+    order_number: normalized?.order_no || normalized?.order_number || normalized?.order_id || 'N/A',
   };
 }

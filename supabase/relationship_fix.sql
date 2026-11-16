@@ -44,7 +44,7 @@ update public.purchase_orders
 set created_by = admin_profile.id
 from (
   select id from public.profiles
-  where role in ('Super Admin', 'Beauty Admin', 'Beauty Staff')
+  where role in ('super_admin', 'beauty_admin', 'beauty_staff')
   order by created_at
   limit 1
 ) admin_profile

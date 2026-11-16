@@ -2,12 +2,14 @@
 create extension if not exists pgcrypto;
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
-  full_name text not null default '',
-  role text not null default 'Customer' check (role in ('Customer', 'Beauty Staff', 'Beauty Admin', 'Super Admin')),
+  first_name text not null default '',
+  last_name text not null default '',
+  role text not null default 'customer' check (role in ('customer', 'beauty_staff', 'beauty_admin', 'super_admin')),
   skin_profile jsonb not null default '{}'::jsonb,
   email text,
   phone text,
   birthday date,
+  account_status text not null default 'Active' check (account_status in ('Active', 'Inactive')),
   last_seen_at timestamptz,
   created_at timestamptz not null default now()
 );
@@ -33,12 +35,12 @@ create table if not exists public.products (
   category_id uuid references public.categories(id),
   name text not null,
   description text,
-  price numeric(10, 2) not null check (price >= 0),
-  original_price numeric(10, 2),
+  price numeric not null check (price >= 0),
+  original_price numeric,
   image text,
   images text[] not null default '{}',
   tags text[] not null default '{}',
-  rating numeric(3, 2) not null default 0,
+  rating numeric not null default 0,
   reviews integer not null default 0,
   badge text,
   status text not null default 'Draft' check (status in ('Active', 'Draft', 'Archived')),
@@ -50,7 +52,7 @@ create table if not exists public.product_variants (
   product_id uuid not null references public.products(id) on delete cascade,
   size text,
   scent text,
-  additional_price numeric(10, 2) not null default 0.00,
+  additional_price numeric not null default 0.00,
   sku text unique not null
 );
 
@@ -65,9 +67,11 @@ create table if not exists public.inventory (
 create table if not exists public.suppliers (
   id uuid primary key default gen_random_uuid(),
   name text not null,
+  contact_name text not null default '',
   contact_email text,
   phone text,
   address text,
+  status text not null default 'Active' check (status in ('Active', 'Inactive', 'Archived')),
   created_at timestamptz not null default now()
 );
 
@@ -82,8 +86,12 @@ create table if not exists public.purchase_orders (
   created_by uuid references public.profiles(id),
   supplier_id uuid references public.suppliers(id),
   status text not null default 'Pending' check (status in ('Pending', 'Approved', 'Shipped', 'Received', 'Cancelled')),
-  total_cost numeric(10, 2) not null default 0 check (total_cost >= 0),
-  created_at timestamptz not null default now()
+  total_cost numeric not null default 0 check (total_cost >= 0),
+  expected_delivery date,
+  payment_terms text not null default '',
+  notes text not null default '',
+  created_at timestamptz not null default now(),
+  po_no text unique
 );
 
 create table if not exists public.purchase_order_items (
@@ -91,16 +99,17 @@ create table if not exists public.purchase_order_items (
   purchase_order_id uuid not null references public.purchase_orders(id) on delete cascade,
   product_id uuid not null references public.products(id),
   quantity integer not null check (quantity > 0),
-  unit_cost numeric(10, 2) not null check (unit_cost >= 0)
+  unit_cost numeric not null check (unit_cost >= 0),
+  variant_id uuid references public.product_variants(id)
 );
 
 create table if not exists public.orders (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id),
-  total_amount numeric(10, 2) not null check (total_amount >= 0),
-  subtotal numeric(10, 2) not null default 0,
-  shipping_fee numeric(10, 2) not null default 0,
-  tax numeric(10, 2) not null default 0,
+  total_amount numeric not null check (total_amount >= 0),
+  subtotal numeric not null default 0,
+  shipping_fee numeric not null default 0,
+  tax numeric not null default 0,
   status text not null default 'Pending' check (status in ('Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled')),
   payment_status text not null default 'Unpaid' check (payment_status in ('Unpaid', 'Paid', 'Refunded')),
   stripe_payment_intent_id text,
@@ -112,7 +121,8 @@ create table if not exists public.orders (
   shipping_city text not null default '',
   shipping_zip text not null default '',
   shipping_country text not null default 'Philippines',
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  order_no text unique
 );
 
 create table if not exists public.order_items (
@@ -120,7 +130,7 @@ create table if not exists public.order_items (
   order_id uuid not null references public.orders(id) on delete cascade,
   variant_id uuid not null references public.product_variants(id),
   quantity integer not null check (quantity > 0),
-  price_at_purchase numeric(10, 2) not null check (price_at_purchase >= 0)
+  price_at_purchase numeric not null check (price_at_purchase >= 0)
 );
 
 create table if not exists public.recommendation_rules (
@@ -128,8 +138,34 @@ create table if not exists public.recommendation_rules (
   rule_name text not null,
   trigger_skin_type text[] not null default '{}',
   target_category_id uuid references public.categories(id),
-  weight_modifier numeric(3, 2) not null default 1.00,
+  weight_modifier numeric not null default 1.00,
   is_active boolean not null default true
+);
+
+create table if not exists public.recommendations (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  product_id uuid not null references public.products(id) on delete cascade,
+  score numeric not null,
+  reason text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.customer_product_interactions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  product_id uuid not null references public.products(id) on delete cascade,
+  recommendation_id uuid references public.recommendations(id) on delete set null,
+  interaction_type text not null check (interaction_type in ('view', 'recommendation_shown', 'recommendation_clicked', 'cart', 'wishlist', 'purchase')),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.user_activity_log (
+  id bigint generated by default as identity primary key,
+  actor_id uuid references public.profiles(id) on delete set null,
+  action text not null,
+  details jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.payments (
@@ -138,7 +174,7 @@ create table if not exists public.payments (
   provider text not null,
   provider_reference text,
   status text not null default 'Pending',
-  amount numeric(10, 2) not null check (amount >= 0),
+  amount numeric not null check (amount >= 0),
   created_at timestamptz not null default now()
 );
 
@@ -150,7 +186,10 @@ create table if not exists public.inventory_movements (
   reference text,
   notes text,
   created_by uuid references public.profiles(id),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  movement_no text unique,
+  order_id uuid references public.orders(id) on delete set null,
+  purchase_order_id uuid references public.purchase_orders(id) on delete set null
 );
 
 create table if not exists public.cart_items (
@@ -200,11 +239,19 @@ create index if not exists inventory_variant_id_idx on public.inventory(variant_
 create index if not exists supplier_products_product_id_idx on public.supplier_products(product_id);
 create index if not exists purchase_orders_supplier_id_idx on public.purchase_orders(supplier_id);
 create index if not exists purchase_order_items_product_id_idx on public.purchase_order_items(product_id);
+create index if not exists purchase_order_items_variant_id_idx on public.purchase_order_items(variant_id);
 create index if not exists orders_user_id_idx on public.orders(user_id);
 create index if not exists order_items_order_id_idx on public.order_items(order_id);
 create index if not exists order_items_variant_id_idx on public.order_items(variant_id);
 create index if not exists inventory_movements_variant_id_idx on public.inventory_movements(variant_id);
+create index if not exists inventory_movements_order_id_idx on public.inventory_movements(order_id);
+create index if not exists inventory_movements_purchase_order_id_idx on public.inventory_movements(purchase_order_id);
 create index if not exists recommendation_rules_category_idx on public.recommendation_rules(target_category_id);
+create index if not exists recommendations_user_created_idx on public.recommendations(user_id, created_at desc);
+create index if not exists recommendations_product_idx on public.recommendations(product_id);
+create index if not exists interactions_user_created_idx on public.customer_product_interactions(user_id, created_at desc);
+create index if not exists interactions_product_type_idx on public.customer_product_interactions(product_id, interaction_type);
+create index if not exists user_activity_log_created_idx on public.user_activity_log(created_at desc);
 create index if not exists purchase_orders_created_by_idx on public.purchase_orders(created_by);
 create index if not exists cart_items_product_id_idx on public.cart_items(product_id);
 create index if not exists wishlist_items_product_id_idx on public.wishlist_items(product_id);
@@ -212,15 +259,7 @@ create index if not exists wishlist_items_product_id_idx on public.wishlist_item
 create or replace function public.is_admin()
 returns boolean language sql stable security definer set search_path = public
 as $$
-  select exists (select 1 from public.profiles where id = auth.uid() and role in ('Super Admin', 'Beauty Admin', 'Beauty Staff'));
-$$;
-
-create or replace function public.touch_customer_activity()
-returns void language sql security definer set search_path = public
-as $$
-  update public.profiles
-  set last_seen_at = now()
-  where id = auth.uid() and role = 'Customer';
+  select exists (select 1 from public.profiles where id = auth.uid() and role = 'super_admin' and account_status = 'Active');
 $$;
 
 create or replace function public.record_inventory_movement(
@@ -257,12 +296,62 @@ begin
 end;
 $$;
 
+create sequence if not exists public.order_no_seq;
+create sequence if not exists public.po_no_seq;
+create sequence if not exists public.movement_no_seq;
+
+create or replace function public.gen_order_no()
+returns trigger language plpgsql as $$
+begin
+  if new.order_no is null then
+    new.order_no := 'ORD-' || to_char(coalesce(new.created_at, now()), 'YYYY') || '-' || lpad(nextval('public.order_no_seq')::text, 6, '0');
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.gen_po_no()
+returns trigger language plpgsql as $$
+begin
+  if new.po_no is null then
+    new.po_no := 'PO-' || to_char(coalesce(new.created_at, now()), 'YYYY') || '-' || lpad(nextval('public.po_no_seq')::text, 6, '0');
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.gen_movement_no()
+returns trigger language plpgsql as $$
+begin
+  if new.movement_no is null then
+    new.movement_no := (case when new.movement_type = 'Stock In' then 'SI-' else 'SO-' end)
+      || to_char(coalesce(new.created_at, now()), 'YYYY') || '-' || lpad(nextval('public.movement_no_seq')::text, 6, '0');
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_order_no on public.orders;
+create trigger trg_order_no before insert on public.orders for each row execute procedure public.gen_order_no();
+
+drop trigger if exists trg_po_no on public.purchase_orders;
+create trigger trg_po_no before insert on public.purchase_orders for each row execute procedure public.gen_po_no();
+
+drop trigger if exists trg_movement_no on public.inventory_movements;
+create trigger trg_movement_no before insert on public.inventory_movements for each row execute procedure public.gen_movement_no();
+
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public
 as $$
 begin
-  insert into public.profiles (id, full_name, email, skin_profile)
-  values (new.id, coalesce(new.raw_user_meta_data ->> 'full_name', ''), new.email, coalesce(new.raw_user_meta_data -> 'skin_profile', '{}'::jsonb))
+  insert into public.profiles (id, first_name, last_name, email, skin_profile)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data ->> 'first_name', ''),
+    coalesce(new.raw_user_meta_data ->> 'last_name', ''),
+    new.email,
+    coalesce(new.raw_user_meta_data -> 'skin_profile', '{}'::jsonb)
+  )
   on conflict (id) do update set email = excluded.email;
   return new;
 end;
@@ -296,7 +385,9 @@ declare
   v_item jsonb;
   v_inventory public.inventory;
 begin
-  if p_user_id <> auth.uid() then raise exception 'User mismatch'; end if;
+  if p_user_id <> auth.uid() or not exists (
+    select 1 from public.profiles where id = auth.uid() and role = 'customer'
+  ) then raise exception 'Customer access required'; end if;
   insert into public.orders (user_id, total_amount, subtotal, shipping_fee, tax, payment_method, shipping_name, shipping_email, shipping_phone, shipping_address, shipping_city, shipping_zip, shipping_country)
   values (p_user_id, p_total_amount, p_subtotal, p_shipping_fee, p_tax, p_payment_method, p_shipping_name, p_shipping_email, p_shipping_phone, p_shipping_address, p_shipping_city, p_shipping_zip, p_shipping_country)
   returning * into v_order;
@@ -307,7 +398,8 @@ begin
     insert into public.order_items (order_id, variant_id, quantity, price_at_purchase)
     values (v_order.id, (v_item ->> 'variant_id')::uuid, (v_item ->> 'quantity')::integer, (v_item ->> 'price_at_purchase')::numeric);
     update public.inventory set stock_quantity = stock_quantity - (v_item ->> 'quantity')::integer, updated_at = now() where id = v_inventory.id;
-    insert into public.inventory_movements (variant_id, movement_type, quantity, reference) values ((v_item ->> 'variant_id')::uuid, 'Stock Out', (v_item ->> 'quantity')::integer, v_order.id::text);
+    insert into public.inventory_movements (variant_id, movement_type, quantity, reference, order_id)
+    values ((v_item ->> 'variant_id')::uuid, 'Stock Out', (v_item ->> 'quantity')::integer, v_order.id::text, v_order.id);
   end loop;
   insert into public.payments (order_id, provider, status, amount) values (v_order.id, case when p_payment_method = 'cash_on_delivery' then 'Cash on Delivery' else 'Stripe' end, 'Pending', p_total_amount);
   return v_order;
@@ -369,6 +461,9 @@ alter table public.cart_items enable row level security;
 alter table public.wishlist_items enable row level security;
 alter table public.user_addresses enable row level security;
 alter table public.user_payment_methods enable row level security;
+alter table public.recommendations enable row level security;
+alter table public.customer_product_interactions enable row level security;
+alter table public.user_activity_log enable row level security;
 
 drop policy if exists profiles_self_or_admin on public.profiles;
 drop policy if exists public_active_products on public.products;
@@ -402,6 +497,21 @@ drop policy if exists own_cart_items on public.cart_items;
 drop policy if exists own_wishlist_items on public.wishlist_items;
 
 create policy profiles_self_or_admin on public.profiles for all using (id = auth.uid() or public.is_admin()) with check (id = auth.uid() or public.is_admin());
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('product-images', 'product-images', true, 5242880, array['image/webp', 'image/jpeg'])
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+drop policy if exists product_images_public_read on storage.objects;
+drop policy if exists product_images_admin_insert on storage.objects;
+drop policy if exists product_images_admin_delete on storage.objects;
+create policy product_images_public_read on storage.objects for select to public
+using (bucket_id = 'product-images');
+create policy product_images_admin_insert on storage.objects for insert to authenticated
+with check (bucket_id = 'product-images' and public.is_admin());
+create policy product_images_admin_delete on storage.objects for delete to authenticated
+using (bucket_id = 'product-images' and public.is_admin());
 create policy public_active_products on public.products for select using (status = 'Active' or public.is_admin());
 create policy public_active_variants on public.product_variants for select using (exists (select 1 from public.products p where p.id = product_id and (p.status = 'Active' or public.is_admin())));
 create policy public_brands on public.brands for select using (true);
@@ -429,13 +539,28 @@ create policy own_order_payment_insert on public.payments for insert with check 
 );
 create policy admin_movements on public.inventory_movements for all using (public.is_admin()) with check (public.is_admin());
 create policy own_order_movement_insert on public.inventory_movements for insert with check (
-  auth.uid() is not null and reference is not null and exists (
+  auth.uid() is not null and order_id is not null and exists (
     select 1 from public.orders o
-    where o.id::text = reference and o.user_id = auth.uid()
+    where o.id = order_id and o.user_id = auth.uid()
   )
 );
 create policy own_cart_items on public.cart_items for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy own_wishlist_items on public.wishlist_items for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+drop policy if exists recommendations_owner_select on public.recommendations;
+create policy recommendations_owner_select on public.recommendations for select to authenticated
+using (user_id = auth.uid());
+drop policy if exists recommendations_owner_insert on public.recommendations;
+create policy recommendations_owner_insert on public.recommendations for insert to authenticated
+with check (user_id = auth.uid());
+drop policy if exists interactions_owner_all on public.customer_product_interactions;
+create policy interactions_owner_all on public.customer_product_interactions for all to authenticated
+using (user_id = auth.uid()) with check (user_id = auth.uid());
+drop policy if exists user_activity_super_admin_select on public.user_activity_log;
+create policy user_activity_super_admin_select on public.user_activity_log for select to authenticated
+using (public.is_admin());
+drop policy if exists user_activity_insert on public.user_activity_log;
+create policy user_activity_insert on public.user_activity_log for insert to authenticated
+with check (actor_id = auth.uid());
 drop policy if exists own_user_addresses on public.user_addresses;
 create policy own_user_addresses on public.user_addresses for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 drop policy if exists own_user_payment_methods on public.user_payment_methods;
@@ -443,6 +568,7 @@ create policy own_user_payment_methods on public.user_payment_methods for all us
 
 create table if not exists public.support_inquiries (
   id bigint generated by default as identity primary key,
+  user_id uuid references public.profiles(id) on delete set null,
   customer_name text not null default 'Customer',
   email text not null,
   subject text not null default 'Support Request',
@@ -454,6 +580,8 @@ create table if not exists public.support_inquiries (
   last_reply text default 'Just now',
   created_at timestamptz not null default now()
 );
+alter table public.support_inquiries
+  add column if not exists user_id uuid references public.profiles(id) on delete set null;
 
 create table if not exists public.support_responses (
   id bigint generated by default as identity primary key,
@@ -466,6 +594,7 @@ create table if not exists public.support_responses (
 
 create index if not exists support_inquiries_status_idx on public.support_inquiries(status);
 create index if not exists support_inquiries_created_at_idx on public.support_inquiries(created_at desc);
+create index if not exists support_inquiries_user_id_idx on public.support_inquiries(user_id);
 create index if not exists support_responses_inquiry_id_idx on public.support_responses(inquiry_id);
 
 alter table public.support_inquiries enable row level security;
@@ -477,26 +606,54 @@ drop policy if exists support_inquiries_update_all on public.support_inquiries;
 drop policy if exists support_responses_select_all on public.support_responses;
 drop policy if exists support_responses_insert_all on public.support_responses;
 drop policy if exists support_responses_update_all on public.support_responses;
+drop policy if exists support_inquiries_admin_select on public.support_inquiries;
+drop policy if exists support_inquiries_customer_select on public.support_inquiries;
+drop policy if exists support_inquiries_public_insert on public.support_inquiries;
+drop policy if exists support_inquiries_admin_update on public.support_inquiries;
+drop policy if exists support_responses_admin_select on public.support_responses;
+drop policy if exists support_responses_admin_insert on public.support_responses;
 
-create policy support_inquiries_select_all on public.support_inquiries for select using (true);
-create policy support_inquiries_insert_all on public.support_inquiries for insert with check (true);
-create policy support_inquiries_update_all on public.support_inquiries for update using (true) with check (true);
+create policy support_inquiries_admin_select on public.support_inquiries for select to authenticated
+using (public.is_admin());
+create policy support_inquiries_customer_select on public.support_inquiries for select to authenticated
+using (
+  user_id = auth.uid()
+  or (user_id is null and lower(email) = lower(auth.jwt() ->> 'email'))
+);
+create policy support_inquiries_public_insert on public.support_inquiries for insert to anon, authenticated
+with check (
+  status = 'Open' and coalesce(support_reply, '') = ''
+  and ((auth.uid() is null and user_id is null) or user_id = auth.uid())
+);
+create policy support_inquiries_admin_update on public.support_inquiries for update to authenticated
+using (public.is_admin()) with check (public.is_admin());
 
-create policy support_responses_select_all on public.support_responses for select using (true);
-create policy support_responses_insert_all on public.support_responses for insert with check (true);
-create policy support_responses_update_all on public.support_responses for update using (true) with check (true);
+create policy support_responses_admin_select on public.support_responses for select to authenticated
+using (public.is_admin());
+create policy support_responses_admin_insert on public.support_responses for insert to authenticated
+with check (public.is_admin());
 
 grant usage on schema public to anon, authenticated;
 grant select on public.brands, public.categories, public.products, public.product_variants, public.inventory to anon, authenticated;
+grant select, insert, update, delete on public.products, public.product_variants to authenticated;
 grant select, insert, update, delete on public.inventory to authenticated;
 grant select on public.recommendation_rules to anon, authenticated;
 grant select on public.product_sales, public.sales_by_month, public.underperforming_products to authenticated;
-grant select, insert, update on public.profiles to authenticated;
+revoke insert, update, delete on public.profiles from anon, authenticated;
+grant select on public.profiles to authenticated;
+grant update (first_name, last_name, phone, birthday, skin_profile) on public.profiles to authenticated;
 grant select, insert, update, delete on public.cart_items, public.wishlist_items to authenticated;
 grant select, insert, update, delete on public.user_addresses to authenticated;
 grant select, insert, update, delete on public.user_payment_methods to authenticated;
-grant execute on function public.touch_customer_activity() to authenticated;
+grant select, insert on public.recommendations to authenticated;
+grant select, insert on public.customer_product_interactions to authenticated;
+grant select, insert on public.user_activity_log to authenticated;
 grant execute on function public.record_inventory_movement(uuid, text, integer, text, text) to authenticated;
 grant select, insert, update, delete on public.suppliers, public.supplier_products, public.purchase_orders, public.purchase_order_items, public.orders, public.order_items, public.payments, public.inventory_movements to authenticated;
+grant insert on public.support_inquiries to anon, authenticated;
+grant select, update on public.support_inquiries to authenticated;
+grant usage, select on sequence public.support_inquiries_id_seq to anon, authenticated;
+grant select, insert on public.support_responses to authenticated;
+grant usage, select on sequence public.support_responses_id_seq to authenticated;
 
 grant execute on function public.place_order(uuid, jsonb, numeric, numeric, numeric, numeric, text, text, text, text, text, text, text, text) to authenticated;

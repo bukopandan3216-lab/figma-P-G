@@ -1,121 +1,665 @@
 import { useEffect, useState } from 'react';
-import { Plus, Edit2, Trash2 } from 'lucide-react';
+import { Plus, Edit2, Trash2, RotateCcw, Tag, Eye, X } from 'lucide-react';
 import { useCatalog } from '../../context/CatalogContext';
+import type { Product } from '../../data/products';
 import { supabase } from '../../lib/supabase';
-import { Button, Badge, DataTable, Modal, Input, Select, useToast, ToastContainer } from '../../components/ui';
+import { Button, Badge, DataTable, Modal, Input, Select, useToast, ToastContainer, LoadingState } from '../../components/ui';
 import AdminSidebar from '../../components/AdminSidebar';
 import { safeImage } from '../../lib/image';
+import { getProductImageStoragePath, removeProductImages, uploadProductImages } from '../../lib/productImages';
 
 type ProductStatus = 'Active' | 'Archived' | 'Draft';
 
 interface AdminProduct {
   id: string;
   image: string;
+  images: string[];
   name: string;
   brand: string;
   category: string;
+  description: string;
   price: number;
   stock: number;
   status: ProductStatus;
+  salePrice?: number | null;
+  discountType?: 'percentage' | 'fixed' | null;
+  discountValue?: number | null;
+  discountStart?: string | null;
+  discountEnd?: string | null;
+  supplier?: string;
+  variantName?: string;
 }
 
-const toAdminProduct = (p: any): AdminProduct => ({
-  id: p.id, image: p.image, name: p.name, brand: p.brand, category: p.category,
-  price: p.price, stock: p.stock, status: p.inStock ? 'Active' : 'Archived',
+const toAdminProduct = (p: Product): AdminProduct => ({
+  id: p.id, image: p.image, images: p.images?.length ? p.images : p.image ? [p.image] : [],
+  name: p.name, brand: p.brand, category: p.category, description: p.description || '',
+  price: p.originalPrice ?? p.price,
+  stock: p.stock, status: p.status || (p.inStock ? 'Active' : 'Archived'),
+  salePrice: p.salePrice ?? null,
+  discountType: p.discountType ?? null,
+  discountValue: p.discountValue ?? null,
+  discountStart: p.discountStart ?? null,
+  discountEnd: p.discountEnd ?? null,
+  supplier: p.supplier || '—',
+  variantName: p.variantName || '—',
 });
 
-const BRANDS = ['Olay', 'Pantene', 'Head & Shoulders', 'Secret', 'Ivory'];
 const CATEGORIES = ['Skin Care', 'Hair Care', 'Body Care', 'Personal Care'];
+
+// timestamptz -> value for <input type="datetime-local"> (browser-local time)
+const toLocalInput = (iso?: string | null) => {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+// <input type="datetime-local"> -> ISO-8601 for timestamptz columns
+const toIso = (value: string) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+interface VariantInput {
+  variantId?: string;
+  name: string;
+  price: string;
+  stock: string;
+}
+
+// Row shape returned by the Variants view modal
+// (product_variants + its inventory row).
+interface VariantRow {
+  variant_id: string;
+  size: string | null;
+  scent: string | null;
+  sku: string | null;
+  additional_price: number | null;
+  inventory?: { stock_quantity: number } | { stock_quantity: number }[] | null;
+}
+
+const rowStock = (row: VariantRow) => {
+  const inventory = Array.isArray(row.inventory) ? row.inventory[0] : row.inventory;
+  return Number(inventory?.stock_quantity || 0);
+};
+
+interface Brand {
+  id: string;
+  name: string;
+  supplier_id: string | null;
+}
+
+interface Supplier {
+  id: string;
+  name: string;
+}
 
 export default function AdminProducts() {
   const { products, loading, error, refresh } = useCatalog();
   const [productList, setProductList] = useState<AdminProduct[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
-  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [archiveId, setArchiveId] = useState<string | null>(null);
+  const [permanentDeleteId, setPermanentDeleteId] = useState<string | null>(null);
+  const [discountId, setDiscountId] = useState<string | null>(null);
+  const [discountModalOpen, setDiscountModalOpen] = useState(false);
+  const [discountForm, setDiscountForm] = useState({ discountType: 'percentage' as 'percentage' | 'fixed' | '', discountValue: '', discountStart: '', discountEnd: '' });
+  const [showArchived, setShowArchived] = useState(false);
   const [uploadedImages, setUploadedImages] = useState<File[]>([]);
-  const [form, setForm] = useState({ name: '', brand: BRANDS[0], category: CATEGORIES[0], price: '', stock: '', status: 'Active' as ProductStatus });
+  const [uploadedPreviews, setUploadedPreviews] = useState<string[]>([]);
+  // Current product photos the user marked for removal in the edit modal.
+  const [removedImages, setRemovedImages] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [supplierByProduct, setSupplierByProduct] = useState<Record<string, string>>({});
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [filteredBrands, setFilteredBrands] = useState<Brand[]>([]);
+  const [numVariants, setNumVariants] = useState(1);
+  const [variantInputs, setVariantInputs] = useState<VariantInput[]>([{ name: '', price: '', stock: '' }]);
+  // Variant ids loaded when the edit modal opens, so save() can add, update and
+  // remove variant rows (removed rows that history references will error out).
+  const [editVariantIds, setEditVariantIds] = useState<string[]>([]);
+  const [variantsFor, setVariantsFor] = useState<AdminProduct | null>(null);
+  const [variantRows, setVariantRows] = useState<VariantRow[]>([]);
+  const [variantsLoading, setVariantsLoading] = useState(false);
+  const [variantsError, setVariantsError] = useState('');
+  const [form, setForm] = useState({
+    name: '',
+    brand: '',
+    category: CATEGORIES[0],
+    description: '',
+    status: 'Active' as ProductStatus,
+    discountType: 'percentage' as 'percentage' | 'fixed' | '',
+    discountValue: '',
+    discountStart: '',
+    discountEnd: '',
+    supplierId: '',
+  });
   const { toasts, add: addToast, remove } = useToast();
 
-  useEffect(() => { setProductList(products.map(toAdminProduct)); }, [products]);
+  useEffect(() => {
+    setProductList(products.map(product => toAdminProduct({ ...product, supplier: supplierByProduct[product.id] ?? product.supplier })));
+  }, [products, supplierByProduct]);
+
+  useEffect(() => {
+    void fetchSuppliers();
+    void fetchBrands();
+    void fetchSupplierByProduct();
+  }, []);
+
+  // Supplier names come from the supplier_products junction (staff-only read).
+  // The shared catalog query deliberately does NOT embed it so signed-out
+  // visitors never hit "permission denied for table supplier_products".
+  const fetchSupplierByProduct = async () => {
+    const { data, error } = await supabase
+      .from('supplier_products')
+      .select('product_id, suppliers(name)');
+    if (error || !data?.length) return;
+    const map: Record<string, string> = {};
+    for (const row of data as unknown as { product_id: string; suppliers?: { name: string } | null }[]) {
+      if (row.suppliers?.name) map[row.product_id] = row.suppliers.name;
+    }
+    setSupplierByProduct(map);
+  };
+
+  const fetchSuppliers = async () => {
+    const { data, error } = await supabase
+      .from('suppliers')
+      .select('id:supplier_id, name')
+      .eq('status', 'Active')
+      .order('name');
+    if (error) return;
+    setSuppliers((data || []).map(s => ({ id: s.id, name: s.name })));
+  };
+
+  const fetchBrands = async () => {
+    const { data, error } = await supabase
+      .from('brands')
+      .select('id:brand_id, name, supplier_id')
+      .order('name');
+    if (error) return;
+    setBrands((data || []).map(b => ({ id: b.id, name: b.name, supplier_id: b.supplier_id ?? null })));
+    setFilteredBrands((data || []).map(b => ({ id: b.id, name: b.name, supplier_id: b.supplier_id ?? null })));
+  };
+
+  const handleSupplierChange = (value: string) => {
+    setForm(prev => ({ ...prev, supplierId: value, brand: '' }));
+    if (value) {
+      const filtered = brands.filter(b => b.supplier_id === value);
+      setFilteredBrands(filtered);
+    } else {
+      setFilteredBrands(brands);
+    }
+  };
+
+  const handleBrandChange = (value: string) => {
+    setForm(prev => ({ ...prev, brand: value }));
+    // The brand <select> posts the brand NAME (save() looks brands up by name).
+    const brand = brands.find(b => b.name === value);
+    const supplierId = brand?.supplier_id;
+    if (supplierId) {
+      setForm(prev => ({ ...prev, supplierId }));
+      setFilteredBrands(brands.filter(b => b.supplier_id === supplierId));
+    }
+  };
+
+  const clearUploads = () => {
+    setUploadedPreviews(previous => { previous.forEach(url => URL.revokeObjectURL(url)); return []; });
+    setUploadedImages([]);
+    setRemovedImages([]);
+  };
+
+  const toggleRemovedImage = (url: string) => {
+    setRemovedImages(previous => previous.includes(url)
+      ? previous.filter(item => item !== url)
+      : [...previous, url]);
+  };
+
+  const handleFileSelection = (files: FileList | null) => {
+    const selected = Array.from(files || []);
+    setUploadedImages(selected);
+    setUploadedPreviews(previous => {
+      previous.forEach(url => URL.revokeObjectURL(url));
+      return selected.map(file => URL.createObjectURL(file));
+    });
+  };
+
+  const removeUploadedImage = (index: number) => {
+    setUploadedImages(previous => previous.filter((_, i) => i !== index));
+    setUploadedPreviews(previous => {
+      if (index < 0 || index >= previous.length) return previous;
+      URL.revokeObjectURL(previous[index]);
+      return previous.filter((_, i) => i !== index);
+    });
+  };
 
   const openAdd = () => {
     setEditId(null);
-    setUploadedImages([]);
-    setForm({ name: '', brand: BRANDS[0], category: CATEGORIES[0], price: '', stock: '', status: 'Active' });
+    clearUploads();
+    setForm({
+      name: '', brand: '', category: CATEGORIES[0], description: '', status: 'Active',
+      discountType: 'percentage', discountValue: '', discountStart: '', discountEnd: '',
+      supplierId: '',
+    });
+    setNumVariants(1);
+    setVariantInputs([{ name: '', price: '', stock: '' }]);
+    setEditVariantIds([]);
+    setFilteredBrands(brands);
     setModalOpen(true);
   };
 
-  const openEdit = (p: AdminProduct) => {
+  const openEdit = async (p: AdminProduct) => {
     setEditId(p.id);
-    setUploadedImages([]);
-    setForm({ name: p.name, brand: p.brand, category: p.category, price: String(p.price), stock: String(p.stock), status: p.status });
+    clearUploads();
+    const brand = brands.find(b => b.name === p.brand);
+    const supplierId = brand?.supplier_id ?? '';
+    setForm({
+      name: p.name, brand: p.brand, category: p.category, description: p.description || '',
+      status: p.status, discountType: p.discountType || 'percentage',
+      discountValue: String(p.discountValue || ''), discountStart: toLocalInput(p.discountStart),
+      discountEnd: toLocalInput(p.discountEnd), supplierId,
+    });
+    setFilteredBrands(brand ? brands.filter(b => b.supplier_id === brand.supplier_id) : brands);
+
+    // Variants carry the price and the stock, so the edit form edits them:
+    // price shown = product base price + the variant's additional_price.
+    const { data, error } = await supabase
+      .from('product_variants')
+      .select('variant_id, size, scent, additional_price, sku, inventory(stock_quantity)')
+      .eq('product_id', p.id)
+      .order('size', { ascending: true });
+    if (error) {
+      addToast('error', `Unable to load this product's variants: ${error.message}`);
+      setNumVariants(1);
+      setVariantInputs([{ name: '', price: '', stock: '' }]);
+      setEditVariantIds([]);
+    } else {
+      const rows = (data || []) as unknown as VariantRow[];
+      const loaded = rows.map(row => ({
+        variantId: row.variant_id,
+        name: row.size || row.scent || '',
+        price: String(p.price + Number(row.additional_price || 0)),
+        stock: String(rowStock(row)),
+      }));
+      setEditVariantIds(rows.map(row => row.variant_id));
+      setNumVariants(Math.max(1, loaded.length || 1));
+      setVariantInputs(loaded.length ? loaded : [{ name: '', price: '', stock: '' }]);
+    }
     setModalOpen(true);
   };
 
-  const readAsDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('Unable to read file')); 
-    reader.readAsDataURL(file);
-  });
+  const openVariants = async (p: AdminProduct) => {
+    setVariantsFor(p);
+    setVariantRows([]);
+    setVariantsError('');
+    setVariantsLoading(true);
+    const { data, error } = await supabase
+      .from('product_variants')
+      .select('variant_id, size, scent, sku, additional_price, inventory(stock_quantity)')
+      .eq('product_id', p.id)
+      .order('size', { ascending: true });
+    setVariantsLoading(false);
+    if (error) { setVariantsError(error.message); return; }
+    setVariantRows((data || []) as unknown as VariantRow[]);
+  };
+
+  const openDiscount = (p: AdminProduct) => {
+    setDiscountId(p.id);
+    setDiscountForm({ discountType: p.discountType || 'percentage', discountValue: String(p.discountValue || ''), discountStart: toLocalInput(p.discountStart), discountEnd: toLocalInput(p.discountEnd) });
+    setDiscountModalOpen(true);
+  };
+
+  const saveDiscount = async () => {
+    if (!discountId) return;
+    const discountValue = discountForm.discountValue ? Number(discountForm.discountValue) : null;
+    if (!discountForm.discountType || discountValue === null || !discountForm.discountStart || !discountForm.discountEnd) {
+      addToast('error', 'Please fill all discount fields.');
+      return;
+    }
+    const product = productList.find(p => p.id === discountId);
+    // AdminProduct.price is always the full (undiscounted) price, so a product
+    // that is already on sale still gets the new discount off its real price.
+    const basePrice = product?.price ?? 0;
+    const salePrice = discountForm.discountType === 'percentage'
+      ? Math.max(0, basePrice * (1 - discountValue / 100))
+      : Math.max(0, basePrice - discountValue);
+
+    const { error } = await supabase.from('products').update({
+      original_price: basePrice,
+      price: salePrice,
+      sale_price: salePrice,
+      discount_type: discountForm.discountType,
+      discount_value: discountValue,
+      discount_start: toIso(discountForm.discountStart),
+      discount_end: toIso(discountForm.discountEnd),
+    }).eq('product_id', discountId);
+
+    if (error) { addToast('error', error.message); return; }
+    addToast('success', 'Discount/sale updated.');
+    setDiscountId(null);
+    setDiscountModalOpen(false);
+    await refresh();
+  };
+
+  const clearDiscount = async () => {
+    if (!discountId) return;
+    const product = productList.find(p => p.id === discountId);
+    const basePrice = product?.price ?? 0;
+    const { error } = await supabase.from('products').update({
+      original_price: null,
+      price: basePrice,
+      sale_price: null,
+      discount_type: null,
+      discount_value: null,
+      discount_start: null,
+      discount_end: null,
+    }).eq('product_id', discountId);
+    if (error) { addToast('error', error.message); return; }
+    addToast('success', 'Discount removed. Price restored to full.');
+    setDiscountId(null);
+    setDiscountModalOpen(false);
+    await refresh();
+  };
+
+  // Edit mode: reconcile the form's variants with the rows in the database.
+  // Variant price = product base price + additional_price; stock lives in inventory.
+  const syncVariants = async (productId: string, basePrice: number) => {
+    const kept = variantInputs.filter(vi => vi.variantId);
+    const removedIds = editVariantIds.filter(id => !kept.some(vi => vi.variantId === id));
+
+    for (const variantId of removedIds) {
+      const { error } = await supabase.from('product_variants').delete().eq('variant_id', variantId);
+      if (error) throw new Error(`Unable to remove a variant: ${error.message}. Variants already used in orders or stock movements cannot be deleted.`);
+    }
+
+    for (const vi of variantInputs) {
+      const additionalPrice = Number(vi.price) - basePrice;
+      if (vi.variantId) {
+        const { error } = await supabase.from('product_variants')
+          .update({ size: vi.name, additional_price: additionalPrice })
+          .eq('variant_id', vi.variantId);
+        if (error) throw new Error(`Unable to update variant "${vi.name}": ${error.message}`);
+
+        const { data: updated, error: stockError } = await supabase.from('inventory')
+          .update({ stock_quantity: Number(vi.stock), updated_at: new Date().toISOString() })
+          .eq('variant_id', vi.variantId)
+          .select('inventory_id');
+        if (stockError) throw new Error(`Unable to update stock for "${vi.name}": ${stockError.message}`);
+        if (!updated?.length) {
+          const { error: insertError } = await supabase.from('inventory')
+            .insert({ variant_id: vi.variantId, stock_quantity: Number(vi.stock) });
+          if (insertError) throw new Error(`Unable to set stock for "${vi.name}": ${insertError.message}`);
+        }
+      } else {
+        const { data: variant, error } = await supabase.from('product_variants').insert({
+          product_id: productId,
+          sku: `${vi.name.toUpperCase().replace(/\s+/g, '-')}-${crypto.randomUUID().slice(0, 8)}`,
+          size: vi.name,
+          scent: '',
+          additional_price: additionalPrice,
+        }).select('id:variant_id').single();
+        if (error) throw new Error(`Unable to add variant "${vi.name}": ${error.message}`);
+
+        const { error: inventoryError } = await supabase.from('inventory')
+          .insert({ variant_id: variant.id, stock_quantity: Number(vi.stock) });
+        if (inventoryError) throw new Error(`Unable to add stock for "${vi.name}": ${inventoryError.message}`);
+      }
+    }
+  };
 
   const save = async () => {
     if (!form.name.trim()) { addToast('error', 'Product name is required.'); return; }
-    if (!form.price || isNaN(+form.price)) { addToast('error', 'Enter a valid price.'); return; }
-    if (editId) {
-      void supabase.from('products').update({ name: form.name, price: +form.price, status: form.status }).eq('id', editId).then(({ error }) => {
-        if (error) addToast('error', error.message);
-        else { setProductList(prev => prev.map(p => p.id === editId ? { ...p, ...form, price: +form.price, stock: +form.stock || p.stock } : p)); void refresh(); }
-      });
-      addToast('success', 'Product updated successfully!');
-      setModalOpen(false);
-      return;
+    if (!form.supplierId) { addToast('error', 'Please select a supplier.'); return; }
+    if (!form.brand) { addToast('error', 'Please select a brand.'); return; }
+
+    // Validate all variant inputs — variants are the only place a price or a
+    // stock quantity is entered.
+    for (let i = 0; i < variantInputs.length; i++) {
+      const vi = variantInputs[i];
+      if (!vi.name.trim()) { addToast('error', `Variant ${i + 1}: Name is required.`); return; }
+      if (!vi.price || !Number.isFinite(Number(vi.price)) || Number(vi.price) < 0) { addToast('error', `Variant ${i + 1}: Enter a valid price.`); return; }
+      if (!vi.stock || !Number.isInteger(Number(vi.stock)) || Number(vi.stock) < 0) { addToast('error', `Variant ${i + 1}: Enter a whole-number stock quantity.`); return; }
     }
+    if (!variantInputs.length) { addToast('error', 'Add at least one variant.'); return; }
 
+    // products.price is derived from the variants (cheapest variant) so the
+    // storefront and the discount engine still have a base price to work with;
+    // each variant keeps its own price as additional_price on top of it.
+    const basePrice = Math.min(...variantInputs.map(vi => Number(vi.price)));
+
+    setSaving(true);
+    let uploadedPaths: string[] = [];
+    let productReferencesImages = false;
     try {
-      const uploadedUrls = uploadedImages.length ? await Promise.all(uploadedImages.map(readAsDataUrl)) : [];
-      const primaryImage = uploadedUrls[0] || '';
-      const images = uploadedUrls.length > 1 ? uploadedUrls : [];
+      if (editId) {
+        const newImages = uploadedImages.length ? await uploadProductImages(editId, uploadedImages) : [];
+        uploadedPaths = newImages.map(image => image.path);
 
-      const { data: brand } = await supabase.from('brands').select('id').eq('name', form.brand).single();
-      const { data: category } = await supabase.from('categories').select('id').eq('name', form.category).single();
-      const { data: product, error } = await supabase.from('products').insert({
-        name: form.name,
-        brand_id: brand?.id,
-        category_id: category?.id,
-        price: +form.price,
-        image: primaryImage,
-        images: images,
-        description: '',
-        tags: [],
-        status: form.status,
-      }).select('id').single();
+        // Images are merged, not replaced: kept current photos stay, photos the
+        // user removed from the modal are dropped, and new uploads are appended.
+        const currentProduct = productList.find(product => product.id === editId);
+        const existingUrls = [...new Set([currentProduct?.image, ...(currentProduct?.images || [])]
+          .filter((image): image is string => Boolean(image)))];
+        const mergedUrls = [...new Set([
+          ...existingUrls.filter(url => !removedImages.includes(url)),
+          ...newImages.map(image => image.url),
+        ])];
 
-      if (error) { addToast('error', error.message); return; }
+        const update: { name: string; price: number; status: ProductStatus; description?: string; original_price?: number | null; image?: string; images?: string[]; sale_price?: number | null; discount_type?: 'percentage' | 'fixed' | null; discount_value?: number | null; discount_start?: string | null; discount_end?: string | null } = {
+          name: form.name,
+          price: basePrice,
+          status: form.status,
+          description: form.description,
+          original_price: null,
+          sale_price: null,
+          discount_type: null,
+          discount_value: null,
+          discount_start: null,
+          discount_end: null,
+        };
+        const discountValue = form.discountValue ? Number(form.discountValue) : null;
+        if (form.discountType && discountValue !== null && form.discountStart && form.discountEnd) {
+          const salePrice = form.discountType === 'percentage'
+            ? basePrice * (1 - discountValue / 100)
+            : basePrice - discountValue;
+          update.original_price = basePrice;
+          update.price = Math.max(0, salePrice);
+          update.sale_price = Math.max(0, salePrice);
+          update.discount_type = form.discountType;
+          update.discount_value = discountValue;
+          update.discount_start = toIso(form.discountStart);
+          update.discount_end = toIso(form.discountEnd);
+        }
+        if (mergedUrls.length) {
+          update.image = mergedUrls[0];
+          update.images = mergedUrls;
+        } else {
+          update.image = '';
+          update.images = [];
+        }
 
-      const { data: variant, error: variantError } = await supabase.from('product_variants').insert({ product_id: product.id, sku: `SKU-${crypto.randomUUID()}` }).select('id').single();
-      if (variantError) { addToast('error', variantError.message); return; }
+        const { error } = await supabase.from('products').update(update).eq('product_id', editId).select('id:product_id').single();
+        if (error) throw error;
+        productReferencesImages = true;
 
-      await supabase.from('inventory').insert({ variant_id: variant.id, stock_quantity: +form.stock || 0 });
-      addToast('success', 'Product added successfully!');
+        const removedPaths = [...new Set(removedImages
+          .map(getProductImageStoragePath)
+          .filter((path): path is string => Boolean(path)))];
+        if (removedPaths.length) {
+          try {
+            await removeProductImages(removedPaths);
+          } catch (error) {
+            addToast('error', `Product updated, but removed image cleanup failed: ${error instanceof Error ? error.message : 'Storage cleanup failed.'}`);
+          }
+        }
+
+        // Variants carry price and stock: add new rows, update the loaded ones
+        // and drop any variant the user removed from the form.
+        await syncVariants(editId, basePrice);
+
+        setProductList(prev => prev.map(product => product.id === editId
+          ? { ...product, name: form.name, price: basePrice, status: form.status, description: form.description,
+              image: mergedUrls[0] || '', images: mergedUrls }
+          : product));
+      } else {
+        const { data: brand, error: brandError } = await supabase.from('brands').select('id:brand_id, supplier_id').eq('name', form.brand).single();
+        if (brandError) throw new Error(`Unable to find brand "${form.brand}": ${brandError.message}`);
+
+        const { data: category, error: categoryError } = await supabase.from('categories').select('id:category_id').eq('name', form.category).single();
+        if (categoryError) throw new Error(`Unable to find category "${form.category}": ${categoryError.message}`);
+
+        const productId = crypto.randomUUID();
+        const images = uploadedImages.length ? await uploadProductImages(productId, uploadedImages) : [];
+        uploadedPaths = images.map(image => image.path);
+        const imageUrls = images.map(image => image.url);
+        const discountValue = form.discountValue ? Number(form.discountValue) : null;
+        let sale_price: number | null = null;
+        let discount_type: 'percentage' | 'fixed' | null = null;
+        let discount_value: number | null = null;
+        let discount_start: string | null = null;
+        let discount_end: string | null = null;
+        if (form.discountType && discountValue !== null && form.discountStart && form.discountEnd) {
+          sale_price = form.discountType === 'percentage'
+            ? basePrice * (1 - discountValue / 100)
+            : basePrice - discountValue;
+          sale_price = Math.max(0, sale_price);
+          discount_type = form.discountType;
+          discount_value = discountValue;
+          discount_start = toIso(form.discountStart);
+          discount_end = toIso(form.discountEnd);
+        }
+        const { data: product, error } = await supabase.from('products').insert({
+          product_id: productId,
+          name: form.name,
+          brand_id: brand.id,
+          category_id: category.id,
+          price: sale_price ?? basePrice,
+          original_price: sale_price != null ? basePrice : null,
+          sale_price,
+          discount_type,
+          discount_value,
+          discount_start,
+          discount_end,
+          image: imageUrls[0] || '',
+          images: imageUrls,
+          description: form.description,
+          tags: [],
+          status: form.status,
+        }).select('id:product_id').single();
+
+        if (error) throw error;
+        if (!product) throw new Error('Product was not returned after saving.');
+        productReferencesImages = true;
+
+        // Create variants, inventory rows, and supplier link for each variant.
+        // The variant price is stored as additional_price on top of the product
+        // base price, so every variant keeps the price typed in the form.
+        for (let i = 0; i < variantInputs.length; i++) {
+          const vi = variantInputs[i];
+          const { data: variant, error: variantError } = await supabase.from('product_variants').insert({
+            product_id: product.id,
+            sku: `${vi.name.toUpperCase().replace(/\s+/g, '-')}-${crypto.randomUUID().slice(0, 8)}`,
+            size: vi.name,
+            scent: '',
+            additional_price: Number(vi.price) - basePrice,
+          }).select('id:variant_id').single();
+          if (variantError) throw new Error(variantError.message);
+          if (!variant) throw new Error(`Variant ${i + 1} was not returned after saving.`);
+
+          const { error: inventoryError } = await supabase.from('inventory').insert({ variant_id: variant.id, stock_quantity: Number(vi.stock) });
+          if (inventoryError) throw new Error(inventoryError.message);
+        }
+
+        // Link product to supplier via supplier_products junction table
+        const { error: supplierProductError } = await supabase.from('supplier_products').insert({
+          supplier_id: form.supplierId,
+          product_id: product.id,
+        });
+        if (supplierProductError) throw new Error(supplierProductError.message);
+      }
+
+      addToast('success', editId ? 'Product updated successfully!' : 'Product added successfully!');
       await refresh();
       setModalOpen(false);
+      clearUploads();
     } catch (error) {
+      if (uploadedPaths.length && !productReferencesImages) {
+        try {
+          await removeProductImages(uploadedPaths);
+        } catch (cleanupError) {
+          addToast('error', `Unable to clean up uploaded product images: ${cleanupError instanceof Error ? cleanupError.message : 'Storage cleanup failed.'}`);
+        }
+      }
       addToast('error', error instanceof Error ? error.message : 'Unable to upload product images.');
+    } finally {
+      setSaving(false);
     }
   };
 
-  const confirmDelete = () => {
-    if (!deleteId) return;
-    void supabase.from('products').update({ status: 'Archived' }).eq('id', deleteId).then(({ error }) => {
-      if (error) addToast('error', error.message);
-      else { addToast('info', 'Product archived.'); void refresh(); }
-    });
-    setDeleteId(null);
+  const archiveProduct = async () => {
+    if (!archiveId) return;
+    const { error: archiveError } = await supabase.from('products').update({ status: 'Archived' }).eq('product_id', archiveId);
+    if (archiveError) { addToast('error', archiveError.message); return; }
+    addToast('info', 'Product moved to Archived Products.');
+    setArchiveId(null);
+    await refresh();
   };
 
-  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm(p => ({ ...p, [k]: e.target.value }));
+  const restoreProduct = async (product: AdminProduct) => {
+    const { error: restoreError } = await supabase.from('products').update({ status: 'Active' }).eq('product_id', product.id);
+    if (restoreError) { addToast('error', restoreError.message); return; }
+    addToast('success', `${product.name} restored.`);
+    await refresh();
+  };
+
+  const permanentlyDeleteProduct = async () => {
+    if (!permanentDeleteId) return;
+    const archivedProduct = productList.find(product => product.id === permanentDeleteId);
+    const { error: deleteError } = await supabase.from('products').delete().eq('product_id', permanentDeleteId);
+    if (deleteError) { addToast('error', deleteError.message); return; }
+    const imagePaths = [...new Set([archivedProduct?.image, ...(archivedProduct?.images || [])]
+      .filter((image): image is string => Boolean(image))
+      .map(getProductImageStoragePath)
+      .filter((path): path is string => Boolean(path)))];
+    try {
+      await removeProductImages(imagePaths);
+    } catch (error) {
+      addToast('error', `Product deleted, but image cleanup failed: ${error instanceof Error ? error.message : 'Storage cleanup failed.'}`);
+    }
+    addToast('info', 'Product permanently deleted.');
+    setPermanentDeleteId(null);
+    await refresh();
+  };
+
+  const set = (k: string, formType: 'main' | 'discount' = 'main') => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    if (formType === 'discount') {
+      setDiscountForm(p => ({ ...p, [k]: e.target.value }));
+    } else {
+      setForm(p => ({ ...p, [k]: e.target.value }));
+    }
+  };
+
+  const handleNumVariantsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const n = Math.max(1, Math.min(20, Number(e.target.value) || 1));
+    setNumVariants(n);
+    const current = variantInputs;
+    if (n > current.length) {
+      const added = Array.from({ length: n - current.length }, () => ({ name: '', price: '', stock: '' }));
+      setVariantInputs([...current, ...added]);
+    } else {
+      setVariantInputs(current.slice(0, n));
+    }
+  };
+
+  const updateVariantInput = (index: number, field: 'name' | 'price' | 'stock', value: string) => {
+    setVariantInputs(prev => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
+  };
 
   return (
     <AdminSidebar>
@@ -123,33 +667,62 @@ export default function AdminProducts() {
       <div className="flex flex-col gap-6 animate-fade-in">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold">Products</h1>
-            <p className="text-sm text-[var(--muted-foreground)]">{productList.length} total products</p>
+            <h1 className="text-xl font-bold">{showArchived ? 'Archived Products' : 'Products'}</h1>
+            <p className="text-sm text-[var(--muted-foreground)]">
+              {showArchived
+                ? `${productList.filter(product => product.status === 'Archived').length} archived products`
+                : `${productList.filter(product => product.status !== 'Archived').length} total products`}
+            </p>
           </div>
-          <Button onClick={openAdd}><Plus size={15} /> Add Product</Button>
+          <div className="flex items-center gap-2">
+            {showArchived ? (
+              <Button variant="outline" onClick={() => setShowArchived(false)}>Back to Products</Button>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => { setShowArchived(true); void refresh(); }}>Archived ({productList.filter(product => product.status === 'Archived').length})</Button>
+                <Button onClick={openAdd}><Plus size={15} /> Add Product</Button>
+              </>
+            )}
+          </div>
         </div>
 
-        {loading && <p className="text-sm text-[var(--muted-foreground)]">Loading products...</p>}
         {error && <p className="text-sm text-red-600">{error}</p>}
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <DataTable
-            data={productList as any}
+            data={productList.filter(product => showArchived ? product.status === 'Archived' : product.status !== 'Archived') as any}
+            emptyMessage={loading ? <LoadingState message="Hang tight, loading products…" /> : 'No products found.'}
             columns={[
               { key: 'image', label: '', sortable: false, render: (row: any) => <img src={safeImage(row.image, row.name)} alt="" className="w-10 h-10 object-cover rounded-[var(--radius)] bg-[var(--secondary)]" /> },
               { key: 'name', label: 'Product Name', render: (row: any) => <span className="font-medium text-sm">{row.name}</span> },
               { key: 'brand', label: 'Brand' },
               { key: 'category', label: 'Category' },
-              { key: 'price', label: 'Price', render: (row: any) => `₱${(+row.price).toFixed(2)}` },
-              { key: 'stock', label: 'Stock', render: (row: any) => (
-                <span className={`font-mono text-sm ${row.stock === 0 ? 'text-red-500' : row.stock < 10 ? 'text-amber-600' : 'text-[var(--foreground)]'}`}>{row.stock}</span>
+              { key: 'supplier', label: 'Supplier', render: (row: any) => <span className="text-xs text-[var(--muted-foreground)]">{row.supplier || '—'}</span> },
+              { key: 'variant', label: 'Variants', render: (row: any) => (
+                <button
+                  onClick={() => void openVariants(row as AdminProduct)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--muted)]"
+                  aria-label={`View variants of ${row.name}`}
+                >
+                  <Eye size={13} /> View
+                </button>
               )},
               { key: 'status', label: 'Status', render: (row: any) => (
                 <Badge variant={row.status === 'Active' ? 'success' : row.status === 'Draft' ? 'warning' : 'muted'}>{row.status}</Badge>
               )},
               { key: 'actions', label: '', sortable: false, render: (row: any) => (
                 <div className="flex gap-1">
-                  <button onClick={() => openEdit(row as AdminProduct)} className="p-1.5 hover:bg-[var(--secondary)] rounded transition-colors text-[var(--muted-foreground)] hover:text-[var(--foreground)]" title="Edit"><Edit2 size={14} /></button>
-                  <button onClick={() => setDeleteId(row.id)} className="p-1.5 hover:bg-red-50 rounded transition-colors text-[var(--muted-foreground)] hover:text-red-500" title="Delete"><Trash2 size={14} /></button>
+                  {showArchived ? (
+                    <>
+                      <button onClick={() => void restoreProduct(row as AdminProduct)} className="p-1.5 hover:bg-emerald-50 rounded transition-colors text-[var(--muted-foreground)] hover:text-emerald-600" title="Restore" aria-label={`Restore ${row.name}`}><RotateCcw size={14} /></button>
+                      <button onClick={() => setPermanentDeleteId(row.id)} className="p-1.5 hover:bg-red-50 rounded transition-colors text-[var(--muted-foreground)] hover:text-red-500" title="Delete permanently" aria-label={`Delete ${row.name} permanently`}><Trash2 size={14} /></button>
+                    </>
+                  ) : (
+                    <>
+                      <button onClick={() => openEdit(row as AdminProduct)} className="p-1.5 hover:bg-[var(--secondary)] rounded transition-colors text-[var(--muted-foreground)] hover:text-[var(--foreground)]" title="Edit"><Edit2 size={14} /></button>
+                      <button onClick={() => openDiscount(row as AdminProduct)} className="p-1.5 hover:bg-amber-50 rounded transition-colors text-[var(--muted-foreground)] hover:text-amber-600" title="Set Discount / Sale" aria-label={`Set discount for ${row.name}`}><Tag size={14} /></button>
+                      <button onClick={() => setArchiveId(row.id)} className="p-1.5 hover:bg-red-50 rounded transition-colors text-[var(--muted-foreground)] hover:text-red-500" title="Archive" aria-label={`Archive ${row.name}`}><Trash2 size={14} /></button>
+                    </>
+                  )}
                 </div>
               )},
             ]}
@@ -160,47 +733,221 @@ export default function AdminProducts() {
         <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editId ? 'Edit Product' : 'Add Product'} size="lg">
           <div className="grid grid-cols-2 gap-4">
             <Input label="Product Name *" value={form.name} onChange={set('name')} placeholder="e.g. Regenerist Cream" className="col-span-2" />
-            <Select label="Brand" value={form.brand} onChange={set('brand')} options={BRANDS.map(b => ({ value: b, label: b }))} />
-            <Select label="Category" value={form.category} onChange={set('category')} options={CATEGORIES.map(c => ({ value: c, label: c }))} />
-            <Input label="Price (₱) *" type="number" value={form.price} onChange={set('price')} placeholder="0.00" />
-            <Input label="Stock Quantity" type="number" value={form.stock} onChange={set('stock')} placeholder="0" />
+            <Select label="Supplier *" value={form.supplierId} onChange={event => handleSupplierChange(event.target.value)} options={suppliers.map(s => ({ value: s.id, label: s.name }))} />
+            <Select label="Brand *" value={form.brand} onChange={event => handleBrandChange(event.target.value)} options={filteredBrands.map(b => ({ value: b.name, label: b.name }))} />
+            <Select label="Category" value={form.category} onChange={event => setForm(prev => ({ ...prev, category: event.target.value }))} options={CATEGORIES.map(c => ({ value: c, label: c }))} />
+            <label className="text-sm font-medium block mb-1">Number of Variants</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min="1"
+                max="20"
+                value={numVariants}
+                onChange={handleNumVariantsChange}
+                className="w-12 rounded border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+              />
+              <span className="text-xs text-[var(--muted-foreground)]">variants</span>
+            </div>
+            <div className="col-span-2">
+              <label className="text-sm font-medium block mb-2">Variant Details</label>
+              <div className="space-y-3">
+                {variantInputs.map((vi, i) => (
+                  <div key={i} className="grid grid-cols-3 gap-3 p-3 rounded border border-[var(--border)] bg-[var(--secondary)]/30">
+                    <div className="flex flex-col">
+                      <label className="text-[10px] uppercase text-[var(--muted-foreground)] mb-1">Variant {i + 1} Name</label>
+                      <input
+                        type="text"
+                        value={vi.name}
+                        onChange={(e) => updateVariantInput(i, 'name', e.target.value)}
+                        placeholder="e.g. 100ml"
+                        className="w-full rounded border border-[var(--border)] bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                      />
+                    </div>
+                    <div className="flex flex-col">
+                      <label className="text-[10px] uppercase text-[var(--muted-foreground)] mb-1">Price (₱) *</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={vi.price}
+                        onChange={(e) => updateVariantInput(i, 'price', e.target.value)}
+                        placeholder="0.00"
+                        className="w-full rounded border border-[var(--border)] bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                      />
+                    </div>
+                    <div className="flex flex-col">
+                      <label className="text-[10px] uppercase text-[var(--muted-foreground)] mb-1">Stock *</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={vi.stock}
+                        onChange={(e) => updateVariantInput(i, 'stock', e.target.value)}
+                        placeholder="0"
+                        className="w-full rounded border border-[var(--border)] bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-[var(--muted-foreground)]">Price and stock are set per variant. The product's base price is taken from its lowest-priced variant.</p>
+            </div>
             <Select label="Status" value={form.status} onChange={set('status')} options={[{ value: 'Active', label: 'Active' }, { value: 'Archived', label: 'Archived' }, { value: 'Draft', label: 'Draft' }]} className="col-span-2" />
             <div className="col-span-2">
               <label className="text-sm font-medium block mb-1">Description</label>
-              <textarea rows={3} className="w-full rounded-[var(--radius)] border border-[var(--border)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)] resize-none" placeholder="Product description…" />
+              <textarea
+                rows={3}
+                value={form.description}
+                onChange={e => setForm(prev => ({ ...prev, description: e.target.value }))}
+                className="w-full rounded-[var(--radius)] border border-[var(--border)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)] resize-none"
+                placeholder="Product description…"
+              />
             </div>
             <div className="col-span-2">
-              <label className="text-sm font-medium block mb-2">Product Image</label>
+              <label className="text-sm font-medium block mb-2">Product Images</label>
               <input
                 type="file"
                 accept="image/*"
                 multiple
-                onChange={(event) => setUploadedImages(Array.from(event.target.files || []))}
+                onChange={(event) => handleFileSelection(event.target.files)}
                 className="block w-full text-sm text-[var(--muted-foreground)] file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-[var(--secondary)] file:text-[var(--foreground)] file:font-medium hover:file:bg-[var(--muted)]"
               />
-              {uploadedImages.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {uploadedImages.slice(0, 4).map((file, index) => (
-                    <span key={`${file.name}-${index}`} className="rounded-full border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs text-[var(--muted-foreground)]">
-                      {file.name}
-                    </span>
-                  ))}
+              {editId && (() => {
+                const current = productList.find(product => product.id === editId);
+                const existing = [...new Set([current?.image, ...(current?.images || [])]
+                  .filter((image): image is string => Boolean(image)))];
+                if (!existing.length) return null;
+                return (
+                  <div className="mt-3">
+                    <p className="text-[10px] uppercase text-[var(--muted-foreground)] mb-1.5">
+                      Current images{removedImages.length ? ` (${existing.length - removedImages.length} kept, ${removedImages.length} marked for removal)` : ''}
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {existing.map(url => {
+                        const marked = removedImages.includes(url);
+                        return (
+                          <div key={url} className="relative">
+                            <img
+                              src={url}
+                              alt=""
+                              className={`h-14 w-14 rounded-md border object-cover transition-opacity ${marked ? 'border-red-300 opacity-40 line-through' : 'border-[var(--border)]'}`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => toggleRemovedImage(url)}
+                              className={`absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border bg-[var(--card)] transition-colors ${marked ? 'border-red-300 text-red-500' : 'border-[var(--border)] text-[var(--muted-foreground)] hover:text-red-500'}`}
+                              aria-label={marked ? 'Keep this image' : 'Remove this image'}
+                              title={marked ? 'Keep this image' : 'Remove this image'}
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+              {uploadedPreviews.length > 0 && (
+                <div className="mt-3">
+                  <p className="text-[10px] uppercase text-[var(--muted-foreground)] mb-1.5">New images ({uploadedPreviews.length}) — added to the product on save</p>
+                  <div className="flex flex-wrap gap-2">
+                    {uploadedPreviews.map((url, index) => (
+                      <div key={`${uploadedImages[index]?.name || 'image'}-${index}`} className="relative">
+                        <img src={url} alt={uploadedImages[index]?.name || `New image ${index + 1}`} className="h-16 w-16 rounded-md border border-[var(--border)] object-cover" />
+                        <button
+                          type="button"
+                          onClick={() => removeUploadedImage(index)}
+                          className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] transition-colors hover:text-red-500"
+                          aria-label={`Remove ${uploadedImages[index]?.name || `image ${index + 1}`}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
           </div>
           <div className="flex gap-3 mt-6">
             <Button variant="outline" onClick={() => setModalOpen(false)} className="flex-1">Cancel</Button>
-            <Button className="flex-1" onClick={save}>{editId ? 'Save Changes' : 'Add Product'}</Button>
+            <Button className="flex-1" loading={saving} onClick={save}>{editId ? 'Save Changes' : 'Add Product'}</Button>
           </div>
         </Modal>
 
-        {/* Delete confirmation */}
-        <Modal open={!!deleteId} onClose={() => setDeleteId(null)} title="Delete Product" size="sm">
-          <p className="text-sm text-[var(--muted-foreground)] mb-6">Are you sure you want to delete this product? This action cannot be undone.</p>
+        {/* Variant viewer — Products table → View */}
+        <Modal open={Boolean(variantsFor)} onClose={() => setVariantsFor(null)} title={`Variants — ${variantsFor?.name ?? ''}`} size="md">
+          {variantsLoading ? (
+            <p className="py-6 text-center text-sm text-[var(--muted-foreground)]">Loading variants…</p>
+          ) : variantsError ? (
+            <p className="py-4 text-sm text-red-500">{variantsError}</p>
+          ) : variantRows.length === 0 ? (
+            <p className="py-4 text-sm text-[var(--muted-foreground)]">This product has no variants yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-left text-xs uppercase text-[var(--muted-foreground)]">
+                    <th className="py-2 pr-3">Variant</th>
+                    <th className="py-2 pr-3">SKU</th>
+                    <th className="py-2 pr-3 text-right">Price</th>
+                    <th className="py-2 text-right">Stock</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {variantRows.map(row => {
+                    const price = (variantsFor?.price ?? 0) + Number(row.additional_price || 0);
+                    const stock = rowStock(row);
+                    return (
+                      <tr key={row.variant_id} className="border-b border-[var(--border)] last:border-0">
+                        <td className="py-2 pr-3 font-medium">{row.size || row.scent || '—'}</td>
+                        <td className="py-2 pr-3 font-mono text-xs text-[var(--muted-foreground)]">{row.sku || '—'}</td>
+                        <td className="py-2 pr-3 text-right font-mono">₱{price.toFixed(2)}</td>
+                        <td className={`py-2 text-right font-mono ${stock === 0 ? 'text-red-500' : stock < 10 ? 'text-amber-600' : 'text-[var(--foreground)]'}`}>{stock}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p className="mt-3 text-xs text-[var(--muted-foreground)]">Price and stock are shown per variant — totals are intentionally not summed.</p>
+            </div>
+          )}
+          <div className="mt-5 flex justify-end">
+            <Button variant="outline" onClick={() => setVariantsFor(null)}>Close</Button>
+          </div>
+        </Modal>
+
+        <Modal open={!!archiveId} onClose={() => setArchiveId(null)} title="Archive Product" size="sm">
+          <p className="text-sm text-[var(--muted-foreground)] mb-6">This product will be hidden from the active product list. You can restore or permanently delete it from Archived Products.</p>
           <div className="flex gap-3">
-            <Button variant="outline" onClick={() => setDeleteId(null)} className="flex-1">Cancel</Button>
-            <Button variant="danger" onClick={confirmDelete} className="flex-1">Delete Product</Button>
+            <Button variant="outline" onClick={() => setArchiveId(null)} className="flex-1">Cancel</Button>
+            <Button variant="danger" onClick={archiveProduct} className="flex-1">Archive Product</Button>
+          </div>
+        </Modal>
+
+        <Modal open={!!permanentDeleteId} onClose={() => setPermanentDeleteId(null)} title="Delete Product Permanently" size="sm">
+          <p className="text-sm text-[var(--muted-foreground)] mb-6">This permanently deletes the product and cannot be undone. Products referenced by purchase or order history cannot be deleted.</p>
+          <div className="flex gap-3">
+            <Button variant="outline" onClick={() => setPermanentDeleteId(null)} className="flex-1">Cancel</Button>
+            <Button variant="danger" onClick={permanentlyDeleteProduct} className="flex-1">Delete Permanently</Button>
+          </div>
+        </Modal>
+
+        {/* Discount / Sale Modal */}
+        <Modal open={discountModalOpen} onClose={() => setDiscountModalOpen(false)} title="Set Discount / Sale" size="md">
+          <div className="grid grid-cols-2 gap-4">
+            <Select label="Type" value={discountForm.discountType} onChange={set('discountType', 'discount')} options={[{ value: 'percentage', label: 'Percentage' }, { value: 'fixed', label: 'Fixed ₱' }]} />
+            <Input label="Value" type="number" value={discountForm.discountValue} onChange={set('discountValue', 'discount')} placeholder="e.g. 20 or 50.00" />
+            <Input label="Starts At" type="datetime-local" value={discountForm.discountStart} onChange={set('discountStart', 'discount')} />
+            <Input label="Ends At" type="datetime-local" value={discountForm.discountEnd} onChange={set('discountEnd', 'discount')} />
+          </div>
+          <div className="flex gap-3 mt-6">
+            <Button variant="outline" onClick={() => setDiscountModalOpen(false)} className="flex-1">Cancel</Button>
+            {productList.find(p => p.id === discountId)?.salePrice != null && (
+              <Button variant="danger" onClick={() => void clearDiscount()}>Remove Discount</Button>
+            )}
+            <Button className="flex-1" onClick={saveDiscount}>Set Discount</Button>
           </div>
         </Modal>
       </div>

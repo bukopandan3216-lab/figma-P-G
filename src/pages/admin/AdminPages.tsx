@@ -2,37 +2,121 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useToast, ToastContainer } from '../../components/ui';
-import { Plus, Edit2, Eye, FileDown, BarChart2, Brain, Lightbulb, Users, ShoppingCart, Truck, TrendingUp, AlertTriangle, CheckCircle, XCircle, Settings } from 'lucide-react';
+import { Plus, Edit2, Eye, FileDown, BarChart2, Brain, Lightbulb, Users, ShoppingCart, Truck, TrendingUp, AlertTriangle, CheckCircle, XCircle, Settings, Archive, Trash2, RotateCcw } from 'lucide-react';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { Button, Badge, DataTable, Modal, Input, Select, Card, EmptyState, Tabs } from '../../components/ui';
+import { Button, Badge, DataTable, Modal, Input, Select, Card, EmptyState, Tabs, LoadingState } from '../../components/ui';
 import AdminSidebar from '../../components/AdminSidebar';
-import { fetchAdminUsers, fetchCustomers, fetchProductSales, fetchPurchases, fetchRecommendationRules, fetchSuppliers, fetchTransactions, fetchSalesSummary, saveRecommendationRule } from '../../lib/adminData';
+import { createPurchaseOrder, fetchAdminUsers, fetchCustomers, fetchProductSales, fetchPurchaseProducts, fetchPurchases, fetchRecommendationRules, fetchSuppliers, fetchTransactions, fetchSalesSummary, manageUser, receivePurchaseOrder, saveRecommendationRule, setCustomerAccountStatus, setSupplierProducts, setSupplierStatus, upsertSupplier } from '../../lib/adminData';
 import { isSupabaseConfigured, supabase } from '../../lib/supabase';
 import { recommendProducts } from '../../lib/recommendations';
 import { useCatalog } from '../../context/CatalogContext';
+import { hasModulePermission } from '../../lib/permissions';
+import { safeImage } from '../../lib/image';
 
 // ─── Suppliers ────────────────────────────────────────────────────────────────
-const suppliers: any[] = [];
-
 export function AdminSuppliers() {
   const [view, setView] = useState<'list' | 'profile'>('list');
   const [selected, setSelected] = useState<any>(null);
-  const [supplierList, setSupplierList] = useState(suppliers);
+  const [supplierList, setSupplierList] = useState<any[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [addForm, setAddForm] = useState({ name: '', contact: '', email: '', phone: '' });
+  const [archiveSupplierId, setArchiveSupplierId] = useState<string | null>(null);
+  const [permanentDeleteSupplierId, setPermanentDeleteSupplierId] = useState<string | null>(null);
+  const [editingSupplierId, setEditingSupplierId] = useState<string | null>(null);
+  const [savingSupplier, setSavingSupplier] = useState(false);
+  const [addForm, setAddForm] = useState({ name: '', contactName: '', email: '', phone: '', address: '' });
+  const [productOptions, setProductOptions] = useState<{ id: string; name: string }[]>([]);
+  const [linkedProducts, setLinkedProducts] = useState<string[]>([]);
   const { toasts, add: addToast, remove } = useToast();
   const setF = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => setAddForm(p => ({ ...p, [k]: e.target.value }));
 
-  useEffect(() => { void fetchSuppliers().then(setSupplierList).catch(error => addToast('error', error.message)); }, []);
+  useEffect(() => {
+    void fetchSuppliers().then(setSupplierList).catch(error => addToast('error', error.message));
+    void fetchPurchaseProducts().then(setProductOptions).catch(error => addToast('error', error.message));
+  }, []);
 
-  const saveSupplier = () => {
-    if (!addForm.name) { addToast('error', 'Supplier name is required.'); return; }
-    void supabase.from('suppliers').insert({ name: addForm.name, contact_email: addForm.email, phone: addForm.phone }).select('*').single().then(({ data, error }) => {
-      if (error) { addToast('error', error.message); return; }
-      setSupplierList(prev => [...prev, { id: data.id, ...addForm, products: 0, status: 'Active', lastOrder: 'N/A' }]);
-      addToast('success', 'Supplier added successfully!');
-      setAddOpen(false); setAddForm({ name: '', contact: '', email: '', phone: '' });
-    });
+  const openAddSupplier = () => {
+    setEditingSupplierId(null);
+    setAddForm({ name: '', contactName: '', email: '', phone: '', address: '' });
+    setLinkedProducts([]);
+    setAddOpen(true);
+  };
+
+  const openEditSupplier = (supplier: any) => {
+    setEditingSupplierId(supplier.id);
+    setAddForm({ name: supplier.name, contactName: supplier.contact === 'N/A' ? '' : supplier.contact, email: supplier.email, phone: supplier.phone, address: supplier.address || '' });
+    setLinkedProducts(supplier.productIds || []);
+    setAddOpen(true);
+  };
+
+  const saveSupplier = async () => {
+    if (!addForm.name.trim()) { addToast('error', 'Supplier name is required.'); return; }
+    setSavingSupplier(true);
+    try {
+      const savedSupplierId = await upsertSupplier(addForm, editingSupplierId || undefined);
+      if (savedSupplierId) await setSupplierProducts(savedSupplierId, linkedProducts);
+      setSupplierList(await fetchSuppliers());
+      addToast('success', editingSupplierId ? 'Supplier updated.' : 'Supplier added.');
+      setAddOpen(false);
+      setEditingSupplierId(null);
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to save supplier.');
+    } finally {
+      setSavingSupplier(false);
+    }
+  };
+
+  const changeSupplierStatus = async (supplier: any) => {
+    const status = supplier.status === 'Active' ? 'Inactive' : 'Active';
+    if (status === 'Inactive' && !window.confirm(`Deactivate ${supplier.name}? Existing purchase orders will be kept.`)) return;
+    try {
+      await setSupplierStatus(supplier.id, status);
+      setSupplierList(rows => rows.map(row => row.id === supplier.id ? { ...row, status } : row));
+      addToast('success', `${supplier.name} ${status === 'Active' ? 'reactivated' : 'deactivated'}.`);
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to update supplier status.');
+    }
+  };
+
+  const archiveSupplier = async () => {
+    if (!archiveSupplierId) return;
+    const supplier = supplierList.find(row => row.id === archiveSupplierId);
+    try {
+      await setSupplierStatus(archiveSupplierId, 'Archived');
+      setSupplierList(rows => rows.map(row => row.id === archiveSupplierId ? { ...row, status: 'Archived' } : row));
+      addToast('info', `${supplier?.name || 'Supplier'} moved to Archived Suppliers.`);
+      setArchiveSupplierId(null);
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to archive supplier.');
+    }
+  };
+
+  const restoreSupplier = async (supplier: any) => {
+    try {
+      await setSupplierStatus(supplier.id, 'Active');
+      setSupplierList(rows => rows.map(row => row.id === supplier.id ? { ...row, status: 'Active' } : row));
+      addToast('success', `${supplier.name} restored.`);
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to restore supplier.');
+    }
+  };
+
+  const permanentlyDeleteSupplier = async () => {
+    if (!permanentDeleteSupplierId) return;
+    const supplier = supplierList.find(row => row.id === permanentDeleteSupplierId);
+    if (supplier?.purchaseOrders?.length) {
+      addToast('error', 'Suppliers with purchase-order history cannot be permanently deleted.');
+      setPermanentDeleteSupplierId(null);
+      return;
+    }
+    const { error } = await supabase.from('suppliers').delete().eq('supplier_id', permanentDeleteSupplierId);
+    if (error) {
+      addToast('error', error.message);
+      return;
+    }
+    setSupplierList(rows => rows.filter(row => row.id !== permanentDeleteSupplierId));
+    addToast('info', 'Supplier permanently deleted.');
+    setPermanentDeleteSupplierId(null);
   };
 
   if (view === 'profile' && selected) return (
@@ -48,7 +132,7 @@ export function AdminSuppliers() {
                 <Badge variant={selected.status === 'Active' ? 'success' : 'muted'}>{selected.status}</Badge>
               </div>
             </div>
-            {[['Contact', selected.contact], ['Email', selected.email], ['Phone', selected.phone], ['Products', selected.products], ['Last Order', selected.lastOrder]].map(([k, v]) => (
+            {[['Contact', selected.contact], ['Email', selected.email], ['Phone', selected.phone], ['Address', selected.address || 'N/A'], ['Product Count', String(selected.products || 0)], ['Products Supplied', (selected.productNames || []).join(', ') || 'None linked'], ['Brands Carried', (selected.brands || []).join(', ') || 'None'], ['Brand Count', String(selected.brandCount || 0)], ['Variants Available', String(selected.variantCount || 0)], ['Last Order', selected.lastOrder]].map(([k, v]) => (
               <div key={k} className="flex justify-between py-2 border-b border-[var(--border)] last:border-0 text-sm">
                 <span className="text-[var(--muted-foreground)]">{k}</span>
                 <span className="font-medium">{v}</span>
@@ -78,36 +162,100 @@ export function AdminSuppliers() {
       <ToastContainer toasts={toasts} onRemove={remove} />
       <div className="flex flex-col gap-6 animate-fade-in">
         <div className="flex items-center justify-between">
-          <div><h1 className="text-xl font-bold">Suppliers</h1><p className="text-sm text-[var(--muted-foreground)]">{supplierList.length} registered suppliers</p></div>
-          <Button onClick={() => setAddOpen(true)}><Plus size={15} /> Add Supplier</Button>
+          <div>
+            <h1 className="text-xl font-bold">{showArchived ? 'Archived Suppliers' : 'Suppliers'}</h1>
+            <p className="text-sm text-[var(--muted-foreground)]">{showArchived ? `${supplierList.filter(supplier => supplier.status === 'Archived').length} archived suppliers` : `${supplierList.filter(supplier => supplier.status !== 'Archived').length} registered suppliers`}</p>
+          </div>
+          {showArchived ? (
+            <Button variant="outline" onClick={() => setShowArchived(false)}>Back to Suppliers</Button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => setShowArchived(true)}>Archived ({supplierList.filter(supplier => supplier.status === 'Archived').length})</Button>
+              <Button onClick={openAddSupplier}><Plus size={15} /> Add Supplier</Button>
+            </div>
+          )}
         </div>
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <DataTable
-            data={supplierList as any}
+            data={supplierList.filter(supplier => showArchived ? supplier.status === 'Archived' : supplier.status !== 'Archived') as any}
             columns={[
               { key: 'name', label: 'Supplier', render: (row: any) => <span className="font-medium">{row.name}</span> },
               { key: 'contact', label: 'Contact' },
               { key: 'email', label: 'Email' },
               { key: 'products', label: 'Products' },
+              { key: 'brands', label: 'Brands', render: (row: any) => (
+                <span className="text-sm" title={(row.brands || []).join(', ')}>{row.brandCount ? `${row.brandCount} brand${row.brandCount === 1 ? '' : 's'}` : '—'}</span>
+              ) },
+              { key: 'variants', label: 'Variants', render: (row: any) => (
+                <span className="text-sm">{row.variantCount ? `${row.variantCount} variant${row.variantCount === 1 ? '' : 's'}` : '—'}</span>
+              ) },
               { key: 'status', label: 'Status', render: (row: any) => <Badge variant={row.status === 'Active' ? 'success' : 'muted'}>{row.status}</Badge> },
               { key: 'lastOrder', label: 'Last Order' },
               { key: 'actions', label: '', sortable: false, render: (row: any) => (
-                <button onClick={() => { setSelected(row as any); setView('profile'); }} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Eye size={14} /></button>
+                <div className="flex items-center gap-1">
+                  {showArchived ? (
+                    <>
+                      <button title="Restore supplier" aria-label={`Restore ${row.name}`} onClick={() => void restoreSupplier(row)} className="p-1.5 hover:bg-emerald-50 rounded text-[var(--muted-foreground)] hover:text-emerald-600 transition-colors"><RotateCcw size={14} /></button>
+                      <button title={row.purchaseOrders?.length ? 'Cannot delete supplier with purchase-order history' : 'Delete permanently'} aria-label={`Delete ${row.name} permanently`} disabled={Boolean(row.purchaseOrders?.length)} onClick={() => setPermanentDeleteSupplierId(row.id)} className="p-1.5 hover:bg-red-50 rounded text-[var(--muted-foreground)] hover:text-red-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"><Trash2 size={14} /></button>
+                    </>
+                  ) : (
+                    <>
+                      <button title="View supplier" aria-label={`View ${row.name}`} onClick={() => { setSelected(row as any); setView('profile'); }} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Eye size={14} /></button>
+                      <button title="Edit supplier" aria-label={`Edit ${row.name}`} onClick={() => openEditSupplier(row)} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Edit2 size={14} /></button>
+                      <button title={row.status === 'Active' ? 'Deactivate supplier' : 'Reactivate supplier'} aria-label={`${row.status === 'Active' ? 'Deactivate' : 'Reactivate'} ${row.name}`} onClick={() => void changeSupplierStatus(row)} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors">{row.status === 'Active' ? <XCircle size={14} /> : <CheckCircle size={14} />}</button>
+                      <button title="Archive supplier" aria-label={`Archive ${row.name}`} onClick={() => setArchiveSupplierId(row.id)} className="p-1.5 hover:bg-red-50 rounded text-[var(--muted-foreground)] hover:text-red-500 transition-colors"><Archive size={14} /></button>
+                    </>
+                  )}
+                </div>
               )},
             ]}
           />
         </div>
       </div>
-      <Modal open={addOpen} onClose={() => setAddOpen(false)} title="Add Supplier">
+      <Modal open={addOpen} onClose={() => setAddOpen(false)} title={editingSupplierId ? 'Edit Supplier' : 'Add Supplier'}>
         <div className="flex flex-col gap-4">
           <Input label="Supplier Name *" value={addForm.name} onChange={setF('name')} placeholder="e.g. P&G Distribution PH" />
-          <Input label="Contact Person" value={addForm.contact} onChange={setF('contact')} placeholder="Ana Cruz" />
+          <Input label="Contact Person" value={addForm.contactName} onChange={setF('contactName')} placeholder="Ana Cruz" />
           <Input label="Email" type="email" value={addForm.email} onChange={setF('email')} placeholder="contact@supplier.com" />
           <Input label="Phone" value={addForm.phone} onChange={setF('phone')} placeholder="+63 2 8123 4567" />
+          <Input label="Address" value={addForm.address} onChange={setF('address')} placeholder="Supplier address" />
+          <div>
+            <p className="text-sm font-medium mb-1">Products Supplied</p>
+            <p className="text-xs text-[var(--muted-foreground)] mb-2">Link the catalogue this supplier provides. Purchase orders and stock movements follow these links.</p>
+            <div className="max-h-40 overflow-y-auto rounded border border-[var(--border)] p-2 grid grid-cols-1 sm:grid-cols-2 gap-1">
+              {productOptions.map(product => (
+                <label key={product.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={linkedProducts.includes(product.id)}
+                    onChange={event => setLinkedProducts(rows => event.target.checked
+                      ? [...rows, product.id]
+                      : rows.filter(id => id !== product.id))}
+                  />
+                  <span className="truncate">{product.name}</span>
+                </label>
+              ))}
+              {!productOptions.length && <p className="text-xs text-[var(--muted-foreground)]">No active products available yet.</p>}
+            </div>
+          </div>
           <div className="flex gap-3 mt-2">
             <Button variant="outline" onClick={() => setAddOpen(false)} className="flex-1">Cancel</Button>
-            <Button onClick={saveSupplier} className="flex-1">Add Supplier</Button>
+            <Button onClick={() => void saveSupplier()} loading={savingSupplier} className="flex-1">{editingSupplierId ? 'Save Changes' : 'Add Supplier'}</Button>
           </div>
+        </div>
+      </Modal>
+      <Modal open={!!archiveSupplierId} onClose={() => setArchiveSupplierId(null)} title="Archive Supplier" size="sm">
+        <p className="text-sm text-[var(--muted-foreground)] mb-6">This supplier will be hidden from the active list and new purchase orders. Existing purchase orders will be kept. You can restore or permanently delete it from Archived Suppliers.</p>
+        <div className="flex gap-3">
+          <Button variant="outline" onClick={() => setArchiveSupplierId(null)} className="flex-1">Cancel</Button>
+          <Button variant="danger" onClick={() => void archiveSupplier()} className="flex-1">Archive Supplier</Button>
+        </div>
+      </Modal>
+      <Modal open={!!permanentDeleteSupplierId} onClose={() => setPermanentDeleteSupplierId(null)} title="Delete Supplier Permanently" size="sm">
+        <p className="text-sm text-[var(--muted-foreground)] mb-6">This permanently deletes the supplier and cannot be undone. Suppliers with purchase-order history cannot be deleted.</p>
+        <div className="flex gap-3">
+          <Button variant="outline" onClick={() => setPermanentDeleteSupplierId(null)} className="flex-1">Cancel</Button>
+          <Button variant="danger" onClick={() => void permanentlyDeleteSupplier()} className="flex-1">Delete Permanently</Button>
         </div>
       </Modal>
     </AdminSidebar>
@@ -115,35 +263,121 @@ export function AdminSuppliers() {
 }
 
 // ─── Purchases ────────────────────────────────────────────────────────────────
-const purchases: any[] = [];
-const statusSteps = ['Draft', 'Submitted', 'Approved', 'Ordered', 'In Transit', 'Received'];
+const statusSteps = ['Pending', 'Approved', 'Shipped', 'Received'];
+type PurchaseLineDraft = { productId: string; quantity: string; unitCost: string };
 
 export function AdminPurchases() {
   const [createOpen, setCreateOpen] = useState(false);
   const [purchaseList, setPurchaseList] = useState<any[]>([]);
-  useEffect(() => { void fetchPurchases().then(setPurchaseList).catch(() => setPurchaseList([])); }, []);
+  const [supplierList, setSupplierList] = useState<any[]>([]);
+  const [productList, setProductList] = useState<{ id: string; name: string }[]>([]);
+  const [supplierId, setSupplierId] = useState('');
+  const [expectedDelivery, setExpectedDelivery] = useState('');
+  const [paymentTerms, setPaymentTerms] = useState('');
+  const [notes, setNotes] = useState('');
+  const [items, setItems] = useState<PurchaseLineDraft[]>([{ productId: '', quantity: '1', unitCost: '' }]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const { toasts, add: addToast, remove } = useToast();
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      const [purchases, suppliers, products] = await Promise.all([fetchPurchases(), fetchSuppliers(), fetchPurchaseProducts()]);
+      setPurchaseList(purchases);
+      setSupplierList(suppliers);
+      setProductList(products);
+      setError('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to load purchase order data.');
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { void loadData(); }, []);
+
+  const updateItem = (index: number, patch: Partial<PurchaseLineDraft>) => {
+    setItems(rows => rows.map((item, rowIndex) => rowIndex === index ? { ...item, ...patch } : item));
+  };
+  const total = items.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unitCost) || 0), 0);
+
+  const resetForm = () => {
+    setSupplierId('');
+    setExpectedDelivery('');
+    setPaymentTerms('');
+    setNotes('');
+    setItems([{ productId: '', quantity: '1', unitCost: '' }]);
+  };
+
+  const savePurchaseOrder = async () => {
+    if (!supplierId) { addToast('error', 'Select a supplier.'); return; }
+    if (!items.length || items.some(item => !item.productId || !Number.isInteger(Number(item.quantity)) || Number(item.quantity) <= 0 || !Number.isFinite(Number(item.unitCost)) || Number(item.unitCost) < 0 || item.unitCost.trim() === '')) {
+      addToast('error', 'Choose a product and enter a positive quantity and valid unit cost for every line.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await createPurchaseOrder({
+        supplierId,
+        expectedDelivery,
+        paymentTerms,
+        notes,
+        items: items.map(item => ({ productId: item.productId, quantity: Number(item.quantity), unitCost: Number(item.unitCost) })),
+      });
+      addToast('success', 'Purchase order created.');
+      setCreateOpen(false);
+      resetForm();
+      await loadData();
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to create purchase order.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const activeSuppliers = supplierList.filter(supplier => supplier.status === 'Active');
+
+  const markReceived = async (row: any) => {
+    if (!row.purchaseOrderId) { addToast('error', 'This purchase order is missing its database id.'); return; }
+    try {
+      await receivePurchaseOrder(row.purchaseOrderId, `Delivery received from ${row.supplier || 'supplier'}`);
+      addToast('success', `${row.id} marked as received — stock was increased and the movement was recorded.`);
+      await loadData();
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to receive this purchase order.');
+    }
+  };
+
   return (
     <AdminSidebar>
+      <ToastContainer toasts={toasts} onRemove={remove} />
       <div className="flex flex-col gap-6 animate-fade-in">
         <div className="flex items-center justify-between">
           <div><h1 className="text-xl font-bold">Purchase Orders</h1><p className="text-sm text-[var(--muted-foreground)]">{purchaseList.length} purchase orders</p></div>
-          <Button onClick={() => setCreateOpen(true)}><Plus size={15} /> Create PO</Button>
+          <Button onClick={() => setCreateOpen(true)} disabled={!activeSuppliers.length || !productList.length}><Plus size={15} /> Create PO</Button>
         </div>
+        {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
+        {!loading && !error && (!activeSuppliers.length || !productList.length) && <p className="text-sm text-[var(--muted-foreground)]">Add an active supplier and at least one active product before creating a purchase order.</p>}
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <DataTable
             data={purchaseList as any}
+            emptyMessage={loading ? <LoadingState message="Hang tight, loading purchase orders…" /> : 'No purchase orders yet.'}
             columns={[
               { key: 'id', label: 'PO Number', render: (row: any) => <span className="font-mono text-sm">{row.id}</span> },
               { key: 'supplier', label: 'What was bought', render: (row: any) => <span className="text-sm text-[var(--foreground)]">{row.productSummary || row.supplier || '—'}</span> },
               { key: 'createdBy', label: 'Created By' },
               { key: 'date', label: 'Date' },
+              { key: 'expectedDelivery', label: 'Expected Delivery' },
               { key: 'items', label: 'Items' },
               { key: 'total', label: 'Total' },
               { key: 'status', label: 'Status', render: (row: any) => (
-                <Badge variant={row.status === 'Delivered' ? 'success' : row.status === 'Shipped' ? 'info' : row.status === 'Pending' ? 'warning' : row.status === 'Cancelled' ? 'danger' : 'muted'}>{row.status}</Badge>
+                <Badge variant={row.status === 'Received' ? 'success' : row.status === 'Shipped' ? 'info' : row.status === 'Pending' ? 'warning' : row.status === 'Cancelled' ? 'danger' : 'muted'}>{row.status}</Badge>
               )},
               { key: 'tracker', label: 'Progress', sortable: false, render: (row: any) => {
                 const idx = statusSteps.indexOf(row.status);
+                if (row.status === 'Cancelled') return <span className="text-xs text-red-600">Cancelled</span>;
                 const safeIdx = idx >= 0 ? idx : 0;
                 return (
                   <div className="flex gap-0.5">
@@ -151,25 +385,43 @@ export function AdminPurchases() {
                   </div>
                 );
               }},
+              { key: 'actions', label: '', sortable: false, render: (row: any) => (
+                row.status === 'Received' || row.status === 'Cancelled' ? null : (
+                  <Button size="sm" variant="outline" onClick={() => void markReceived(row)}>Mark Received</Button>
+                )
+              )},
             ]}
           />
         </div>
         <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create Purchase Order" size="lg">
-          <div className="grid grid-cols-2 gap-4">
-            <Select label="Supplier" options={[{ value: '', label: 'Select supplier…' }, ...suppliers.map(s => ({ value: s.id, label: s.name }))]} className="col-span-2" />
-            <Input label="Expected Delivery" type="date" />
-            <Input label="Payment Terms" placeholder="e.g. Net 30" />
-            <div className="col-span-2">
-              <h3 className="text-sm font-semibold mb-2">Order Items</h3>
-              <div className="border border-[var(--border)] rounded-[var(--radius-lg)] p-3 text-sm text-[var(--muted-foreground)] text-center py-6">
-                + Add product lines
+          <div className="flex flex-col gap-4">
+            <Select label="Supplier" value={supplierId} onChange={event => setSupplierId(event.target.value)} options={[{ value: '', label: 'Select supplier…' }, ...activeSuppliers.map(supplier => ({ value: supplier.id, label: supplier.name }))]} />
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Expected Delivery" type="date" value={expectedDelivery} onChange={event => setExpectedDelivery(event.target.value)} />
+              <Input label="Payment Terms" value={paymentTerms} onChange={event => setPaymentTerms(event.target.value)} placeholder="e.g. Net 30" />
+            </div>
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-sm font-semibold">Order Items</h3>
+                <Button size="sm" variant="outline" onClick={() => setItems(rows => [...rows, { productId: '', quantity: '1', unitCost: '' }])}><Plus size={13} /> Add Line</Button>
+              </div>
+              <div className="flex flex-col gap-3">
+                {items.map((item, index) => (
+                  <div key={index} className="grid grid-cols-2 sm:grid-cols-[minmax(0,1fr)_88px_120px_32px] items-end gap-2">
+                    <Select label={index === 0 ? 'Product' : undefined} value={item.productId} onChange={event => updateItem(index, { productId: event.target.value })} options={[{ value: '', label: 'Select product…' }, ...productList.map(product => ({ value: product.id, label: product.name }))]} className="col-span-2 sm:col-span-1" />
+                    <Input label={index === 0 ? 'Qty' : undefined} type="number" min="1" step="1" value={item.quantity} onChange={event => updateItem(index, { quantity: event.target.value })} />
+                    <Input label={index === 0 ? 'Unit Cost' : undefined} type="number" min="0" step="0.01" value={item.unitCost} onChange={event => updateItem(index, { unitCost: event.target.value })} placeholder="0.00" />
+                    <button type="button" title="Remove line" aria-label={`Remove product line ${index + 1}`} disabled={items.length === 1} onClick={() => setItems(rows => rows.filter((_, rowIndex) => rowIndex !== index))} className="mb-2 p-1.5 rounded text-[var(--muted-foreground)] hover:bg-[var(--secondary)] disabled:opacity-40"><XCircle size={16} /></button>
+                  </div>
+                ))}
               </div>
             </div>
-            <Input label="Notes" placeholder="Optional notes…" className="col-span-2" />
+            <Input label="Notes" value={notes} onChange={event => setNotes(event.target.value)} placeholder="Optional notes…" />
+            <div className="flex justify-end border-t border-[var(--border)] pt-3 text-sm font-semibold">Total: ₱{total.toFixed(2)}</div>
           </div>
           <div className="flex gap-3 mt-6">
             <Button variant="outline" onClick={() => setCreateOpen(false)} className="flex-1">Cancel</Button>
-            <Button className="flex-1" onClick={() => setCreateOpen(false)}>Create Purchase Order</Button>
+            <Button className="flex-1" onClick={() => void savePurchaseOrder()} loading={saving}>Create Purchase Order</Button>
           </div>
         </Modal>
       </div>
@@ -181,14 +433,41 @@ export function AdminPurchases() {
 const customers: any[] = [];
 
 export function AdminCustomers() {
+  const { user } = useAuth();
   const [view, setView] = useState<'list' | 'profile'>('list');
   const [selected, setSelected] = useState<any>(null);
   const [customerList, setCustomerList] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => { void fetchCustomers().then(rows => { setCustomerList(rows); setError(null); }).catch(cause => setError(cause instanceof Error ? cause.message : 'Unable to load customers.')); }, []);
+  const [updatingStatus, setUpdatingStatus] = useState<string | null>(null);
+  const { toasts, add: addToast, remove } = useToast();
+  const loadCustomers = async () => {
+    try {
+      setCustomerList(await fetchCustomers());
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to load customers.');
+    }
+  };
+  useEffect(() => { void loadCustomers(); }, []);
+
+  const toggleCustomerStatus = async (customer: any) => {
+    const status = customer.accountStatus === 'Active' ? 'Inactive' : 'Active';
+    setUpdatingStatus(customer.id);
+    try {
+      await setCustomerAccountStatus(customer.id, status);
+      setCustomerList(rows => rows.map(row => row.id === customer.id ? { ...row, accountStatus: status } : row));
+      if (selected?.id === customer.id) setSelected((row: any) => ({ ...row, accountStatus: status }));
+      addToast('success', `${customer.name}'s account is now ${status.toLowerCase()}.`);
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to update customer status.');
+    } finally {
+      setUpdatingStatus(null);
+    }
+  };
 
   if (view === 'profile' && selected) return (
     <AdminSidebar>
+      <ToastContainer toasts={toasts} onRemove={remove} />
       <div className="animate-fade-in">
         <button onClick={() => setView('list')} className="text-sm text-[var(--muted-foreground)] hover:text-[var(--foreground)] mb-4 flex items-center gap-1">← Back to Customers</button>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -240,6 +519,7 @@ export function AdminCustomers() {
 
   return (
     <AdminSidebar>
+      <ToastContainer toasts={toasts} onRemove={remove} />
       <div className="flex flex-col gap-6 animate-fade-in">
         <div className="flex items-center justify-between">
           <div><h1 className="text-xl font-bold">Customers</h1><p className="text-sm text-[var(--muted-foreground)]">{customerList.length} registered customers</p></div>
@@ -260,6 +540,21 @@ export function AdminCustomers() {
               { key: 'orders', label: 'Orders' },
               { key: 'total', label: 'Total Spend' },
               { key: 'segment', label: 'Segment', render: (row: any) => <Badge variant={row.segment === 'VIP' ? 'rose' : row.segment === 'New' ? 'info' : 'default'}>{row.segment}</Badge> },
+              { key: 'accountStatus', label: 'Account Status', render: (row: any) => (
+                <button
+                  type="button"
+                  disabled={updatingStatus === row.id || !hasModulePermission(user, 'customers', 'manage')}
+                  onClick={() => void toggleCustomerStatus(row)}
+                  aria-pressed={row.accountStatus === 'Active'}
+                  aria-label={`${row.accountStatus === 'Active' ? 'Deactivate' : 'Activate'} ${row.name}`}
+                  className={`inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-medium transition disabled:cursor-wait disabled:opacity-60 ${row.accountStatus === 'Active' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}
+                >
+                  <span className={`relative h-4 w-7 rounded-full transition-colors ${row.accountStatus === 'Active' ? 'bg-emerald-600' : 'bg-red-400'}`}>
+                    <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${row.accountStatus === 'Active' ? 'left-3.5' : 'left-0.5'}`} />
+                  </span>
+                  {updatingStatus === row.id ? 'Saving…' : row.accountStatus}
+                </button>
+              )},
               { key: 'actions', label: '', sortable: false, render: (row: any) => (
                 <button onClick={() => { setSelected(row as any); setView('profile'); }} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Eye size={14} /></button>
               )},
@@ -278,8 +573,24 @@ export function AdminSales() {
   const [detail, setDetail] = useState<any>(null);
   const [transactionList, setTransactionList] = useState<any[]>([]);
   const [summary, setSummary] = useState({ todaySales: 0, monthSales: 0, avgOrderValue: 0, returnRate: 0 });
-  useEffect(() => { void fetchTransactions().then(setTransactionList).catch(() => setTransactionList([])); }, []);
-  useEffect(() => { void fetchSalesSummary().then(setSummary).catch(() => {}); }, []);
+  const [transactionsError, setTransactionsError] = useState('');
+  const [summaryError, setSummaryError] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Pending' | 'Processing' | 'Delivered' | 'Cancelled'>('All');
+  useEffect(() => {
+    let active = true;
+    void fetchTransactions()
+      .then(rows => { if (active) setTransactionList(rows); })
+      .catch(error => { if (active) setTransactionsError(error instanceof Error ? error.message : 'Unable to load transactions.'); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    void fetchSalesSummary()
+      .then(value => { if (active) setSummary(value); })
+      .catch(error => { if (active) setSummaryError(error instanceof Error ? error.message : 'Unable to load the sales summary.'); });
+    return () => { active = false; };
+  }, []);
+  const filteredTransactions = statusFilter === 'All' ? transactionList : transactionList.filter((t: any) => t.status === statusFilter);
   const cards = [
     { l: 'Today\'s Sales', v: peso(summary.todaySales) },
     { l: 'This Month', v: peso(summary.monthSales) },
@@ -290,6 +601,8 @@ export function AdminSales() {
     <AdminSidebar>
       <div className="flex flex-col gap-6 animate-fade-in">
         <div><h1 className="text-xl font-bold">Sales Transactions</h1><p className="text-sm text-[var(--muted-foreground)]">All sales and transaction records</p></div>
+        {summaryError && <p role="alert" className="text-sm text-red-600">Unable to load sales totals: {summaryError}</p>}
+        {transactionsError && <p role="alert" className="text-sm text-red-600">Unable to load transactions: {transactionsError}</p>}
         <div className="grid grid-cols-4 gap-4">
           {cards.map(k => (
             <div key={k.l} className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-4 text-center">
@@ -300,7 +613,7 @@ export function AdminSales() {
         </div>
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <DataTable
-            data={transactionList as any}
+            data={filteredTransactions as any}
             columns={[
               { key: 'id', label: 'Transaction ID', render: (row: any) => <span className="font-mono text-sm">{row.id}</span> },
               { key: 'customer', label: 'Customer' },
@@ -313,247 +626,36 @@ export function AdminSales() {
             ]}
           />
         </div>
-        <Modal open={!!detail} onClose={() => setDetail(null)} title={`Transaction ${detail?.id}`}>
+        <Modal open={!!detail} onClose={() => setDetail(null)} title={`Order ${detail?.id}`}>
           {detail && (
-            <div className="flex flex-col gap-3 text-sm">
-              {[['Customer', detail.customer], ['Date', detail.date], ['Items', detail.items], ['Total', detail.total], ['Payment Method', detail.payment], ['Status', detail.status]].map(([k, v]) => (
-                <div key={k} className="flex justify-between border-b border-[var(--border)] pb-2 last:border-0">
-                  <span className="text-[var(--muted-foreground)]">{k}</span>
-                  <span className="font-medium">{v}</span>
+            <div className="flex flex-col gap-4 text-sm">
+              <div className="flex flex-col">
+                {[['Customer', detail.customer], ['Date', detail.date], ['Items', detail.items], ['Order Total', detail.total], ['Payment Method', detail.payment], ['Payment Status', detail.paymentStatus || '—'], ['Status', detail.status]].map(([k, v]) => (
+                  <div key={k} className="flex justify-between border-b border-[var(--border)] py-2 last:border-0">
+                    <span className="text-[var(--muted-foreground)]">{k}</span>
+                    <span className="font-medium">{v}</span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <h3 className="mb-2 font-semibold">Products in this order</h3>
+                <div className="flex max-h-64 flex-col gap-2 overflow-y-auto pr-1">
+                  {(detail.orderItems || []).map((item: any, index: number) => (
+                    <div key={index} className="flex items-center gap-3 rounded-[var(--radius)] border border-[var(--border)] p-2">
+                      <img src={safeImage(item.productImage, item.productName)} alt="" className="h-11 w-11 flex-shrink-0 rounded bg-[var(--secondary)] object-cover" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium">{item.productName}</p>
+                        <p className="text-xs text-[var(--muted-foreground)]">{item.quantity} × {peso(Number(item.priceAtPurchase || 0))}</p>
+                      </div>
+                      <span className="font-semibold">{peso(Number(item.priceAtPurchase || 0) * Number(item.quantity || 0))}</span>
+                    </div>
+                  ))}
+                  {!detail.orderItems?.length && <p className="text-xs text-[var(--muted-foreground)]">No line items were returned for this order.</p>}
                 </div>
-              ))}
+              </div>
             </div>
           )}
         </Modal>
-      </div>
-    </AdminSidebar>
-  );
-}
-// ─── Customer Insights ────────────────────────────────────────────────────────
-const demandData: any[] = [];
-
-const clusterData: any[] = [];
-
-export function AdminInsights() {
-  const [sales, setSales] = useState<any[]>([]);
-  const [customerClusters, setCustomerClusters] = useState<any[]>([]);
-  useEffect(() => {
-    void fetchProductSales().then(rows => {
-      const nextSales = rows.map((row: any, index: number) => ({
-        id: row.id || `${row.name || 'product'}-${index}`,
-        product: row.name,
-        demand: row.units_sold,
-        stock: row.stock,
-        gap: Math.max(0, row.units_sold - row.stock),
-        sales: row.units_sold,
-        action: row.units_sold === 0 ? 'Review pricing or discontinue' : 'Consider promotion or bundle',
-        type: row.units_sold === 0 ? 'disc' : 'promo',
-      }));
-      setSales(nextSales);
-    }).catch(() => setSales([]));
-
-    void fetchCustomers().then(rows => {
-      setCustomerClusters([{ id: 'all-customers', cluster: 'All Customers', size: rows.length, age: 'All', topProduct: 'Customer demand trends', engagement: '0%' }]);
-    }).catch(() => setCustomerClusters([]));
-  }, []);
-
-  const demand = sales.map((row, index) => ({ ...row, demand: Math.min(100, row.demand), listKey: `${row.id || row.product || 'row'}-${index}` })).slice(0, 8);
-  const underperforming = [...sales].sort((a, b) => a.units_sold - b.units_sold).slice(0, 3).map((product, index) => ({
-    ...product,
-    id: product.id || `${product.product || 'product'}-${index}`,
-    type: product.units_sold === 0 ? 'disc' : 'promo',
-    action: product.units_sold === 0 ? 'Review pricing or discontinue' : 'Consider promotion or bundle',
-  }));
-
-  const aiMetrics = [
-    { label: 'High-demand Categories', value: '7', delta: '+18.4%', tone: 'emerald', note: 'Oral Care leads demand' },
-    { label: 'Repeat Purchase Rate', value: '62%', delta: '+8.1%', tone: 'blue', note: 'Strongest with returning buyers' },
-    { label: 'Stock Risk Alerts', value: '12', delta: '-3.2%', tone: 'amber', note: 'Mostly whitening items' },
-  ];
-
-  const categoryDemand = [
-    { category: 'Oral Care', score: 92, trend: '+24%', volume: '1,240 units', status: 'Healthy' },
-    { category: 'Hair Care', score: 81, trend: '+16%', volume: '910 units', status: 'Growing' },
-    { category: 'Skincare', score: 74, trend: '+11%', volume: '780 units', status: 'Stable' },
-    { category: 'Home Care', score: 58, trend: '-4%', volume: '420 units', status: 'Watch' },
-  ];
-
-  const bundleIdeas = [
-    { pair: 'Whitening Kit', lift: '2.4x uplift', detail: 'Toothpaste + mouthwash bundles' },
-    { pair: 'Hair Repair Combo', lift: '1.9x uplift', detail: 'Shampoo + conditioner + mask' },
-    { pair: 'Daily Care Set', lift: '1.7x uplift', detail: 'Cleanser + toner + serum' },
-  ];
-
-  const customerSegments = [
-    { segment: 'Repeat Buyers', rate: '62%', value: '+8.1%' },
-    { segment: 'First-Time Buyers', rate: '34%', value: '+5.4%' },
-    { segment: 'Wishlist Intent', rate: '48%', value: '+12.7%' },
-  ];
-
-  return (
-    <AdminSidebar>
-      <div className="flex flex-col gap-6 animate-fade-in">
-        <div><h1 className="text-xl font-bold">Customer Insights</h1><p className="text-sm text-[var(--muted-foreground)]">AI-powered demand signals and customer preference analysis</p></div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {aiMetrics.map(item => (
-            <div key={item.label} className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs uppercase tracking-[0.12em] text-[var(--muted-foreground)]">{item.label}</span>
-                <span className={`px-2 py-1 rounded-full text-[10px] font-semibold ${item.tone === 'emerald' ? 'bg-emerald-50 text-emerald-700' : item.tone === 'blue' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>
-                  {item.delta}
-                </span>
-              </div>
-              <div className="mt-3 text-3xl font-bold text-[var(--foreground)]">{item.value}</div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">{item.note}</div>
-            </div>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 xl:col-span-2">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="font-semibold text-sm">Category Demand Snapshot</h2>
-                <p className="text-xs text-[var(--muted-foreground)]">Mock AI view of category momentum</p>
-              </div>
-              <Badge variant="info">AI mockup</Badge>
-            </div>
-            <div className="space-y-3">
-              {categoryDemand.map((item) => (
-                <div key={item.category} className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--secondary)] p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold">{item.category}</div>
-                      <div className="text-xs text-[var(--muted-foreground)]">{item.volume}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-sm font-semibold text-[var(--foreground)]">{item.trend}</div>
-                      <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-foreground)]">{item.status}</div>
-                    </div>
-                  </div>
-                  <div className="mt-2 h-2 bg-[var(--muted)] rounded-full overflow-hidden">
-                    <div className="h-full bg-[var(--primary)] rounded-full" style={{ width: `${item.score}%` }} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
-            <h2 className="font-semibold text-sm mb-4">Customer Segments</h2>
-            <div className="space-y-3">
-              {customerSegments.map((segment) => (
-                <div key={segment.segment} className="rounded-[var(--radius-lg)] bg-[var(--secondary)] p-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">{segment.segment}</span>
-                    <span className="text-xs font-semibold text-emerald-700">{segment.value}</span>
-                  </div>
-                  <div className="mt-2 text-2xl font-bold text-[var(--foreground)]">{segment.rate}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
-            <h2 className="font-semibold text-sm mb-4">Bundle / Upsell Suggestions</h2>
-            <div className="space-y-3">
-              {bundleIdeas.map((item) => (
-                <div key={item.pair} className="flex items-start gap-3 rounded-[var(--radius-lg)] bg-[var(--secondary)] p-3">
-                  <div className="w-9 h-9 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-sm font-bold">+</div>
-                  <div className="flex-1">
-                    <div className="text-sm font-semibold">{item.pair}</div>
-                    <div className="text-xs text-[var(--muted-foreground)]">{item.detail}</div>
-                  </div>
-                  <div className="text-xs font-semibold text-emerald-700 whitespace-nowrap">{item.lift}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
-            <h2 className="font-semibold text-sm mb-4">Next Best Actions</h2>
-            <div className="space-y-3">
-              {[{ title: 'Replenish whitening range', text: 'High demand + low inventory in the most active segment.' }, { title: 'Push oral care bundles', text: 'Customers are converting more when grouped into sets.' }, { title: 'Retarget wishlist users', text: 'Wishlist intent is trending above the average baseline.' }].map((item) => (
-                <div key={item.title} className="flex gap-3 rounded-[var(--radius-lg)] border border-[var(--border)] p-3">
-                  <div className="w-7 h-7 rounded-full bg-[var(--primary)]/10 text-[var(--primary)] flex items-center justify-center text-xs font-bold">✓</div>
-                  <div>
-                    <div className="text-sm font-semibold">{item.title}</div>
-                    <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{item.text}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* Demand vs Stock */}
-          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
-            <h2 className="font-semibold text-sm mb-1">Most In-Demand Products</h2>
-            <p className="text-xs text-[var(--muted-foreground)] mb-4">Demand score vs current stock levels</p>
-            <div className="flex flex-col gap-3">
-              {demand.map((d, index) => (
-                <div key={d.listKey || `${d.product || 'demand'}-${index}`} className="flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium">{d.product}</span>
-                    <div className="flex items-center gap-2">
-                      {d.gap > 0 && <Badge variant="warning">Potential Stockout</Badge>}
-                      <span className="text-[var(--muted-foreground)]">{d.stock} units</span>
-                    </div>
-                  </div>
-                  <div className="h-2 bg-[var(--muted)] rounded-full overflow-hidden">
-                    <div className="h-full bg-[var(--primary)] rounded-full" style={{ width: `${d.demand}%` }} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Underperforming */}
-          <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
-            <h2 className="font-semibold text-sm mb-1">Underperforming Products</h2>
-            <p className="text-xs text-[var(--muted-foreground)] mb-4">Products with low movement — suggested actions</p>
-            <div className="flex flex-col gap-3">
-              {underperforming.map((p: any, index: number) => (
-                <div key={p.id || `${p.name || 'underperformer'}-${index}`} className="flex items-start gap-3 p-3 bg-[var(--secondary)] rounded-[var(--radius-lg)]">
-                  <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs ${p.type === 'disc' ? 'bg-red-100 text-red-600' : p.type === 'promo' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-600'}`}>
-                    {p.type === 'disc' ? <XCircle size={14} /> : p.type === 'promo' ? <Lightbulb size={14} /> : <TrendingUp size={14} />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium">{p.name}</div>
-                    <div className="text-xs text-[var(--muted-foreground)]">{p.units_sold} units sold</div>
-                    <div className="text-xs text-[var(--foreground)] mt-0.5 font-medium">{p.action}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Customer clusters */}
-        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
-          <h2 className="font-semibold text-sm mb-4">Customer Preference Clusters</h2>
-          <DataTable
-            data={customerClusters as any}
-            columns={[
-              { key: 'cluster', label: 'Cluster Name', render: (row: any) => <span className="font-medium">{row.cluster}</span> },
-              { key: 'size', label: 'Customers', render: (row: any) => <span className="font-mono">{row.size.toLocaleString()}</span> },
-              { key: 'age', label: 'Age Range' },
-              { key: 'topProduct', label: 'Top Product' },
-              { key: 'engagement', label: 'Rec Engagement', render: (row: any) => (
-                <div className="flex items-center gap-2">
-                  <div className="w-16 h-1.5 bg-[var(--muted)] rounded-full overflow-hidden">
-                    <div className="h-full bg-[var(--primary)] rounded-full" style={{ width: row.engagement }} />
-                  </div>
-                  <span className="text-xs font-medium">{row.engagement}</span>
-                </div>
-              )},
-            ]}
-          />
-        </div>
       </div>
     </AdminSidebar>
   );
@@ -596,7 +698,7 @@ export function AdminRecommendations() {
   return (
     <AdminSidebar>
       <div className="flex flex-col gap-6 animate-fade-in">
-        <div><h1 className="text-xl font-bold">Recommendation Engine</h1><p className="text-sm text-[var(--muted-foreground)]">Manage AI-powered personalization rules and model status</p></div>
+        <div><h1 className="text-xl font-bold">Recommendation Engine</h1><p className="text-sm text-[var(--muted-foreground)]">Manage recommendation rules and catalog ranking logic</p></div>
 
         {/* Model status */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -613,22 +715,21 @@ export function AdminRecommendations() {
           ))}
         </div>
 
-        {/* AI Integration Point */}
+        {/* Recommendation Integration */}
         <div className="border-2 border-dashed border-[var(--primary)]/30 rounded-[var(--radius-xl)] p-6 bg-[var(--rose-light)]/30">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-full bg-[var(--primary)]/20 flex items-center justify-center flex-shrink-0">
               <Brain size={20} className="text-[var(--primary)]" />
             </div>
             <div>
-              <h3 className="font-semibold text-[var(--foreground)]">AI API Integration Point</h3>
+              <h3 className="font-semibold text-[var(--foreground)]">Recommendation Integration</h3>
               <p className="text-sm text-[var(--muted-foreground)] mt-1">
-                This panel connects to the external recommendation model API. Replace the placeholder endpoint below with your deployed model URL.
-                The engine accepts a customer profile payload and returns a ranked list of product IDs with confidence scores.
+                This panel connects to the local recommendation ranking logic and can be configured for a hosted scoring endpoint when needed.
               </p>
               <div className="mt-3 p-3 bg-[var(--slate-admin)] rounded-[var(--radius-lg)] font-mono text-xs text-emerald-400 overflow-x-auto">
-                <div className="text-white/40">// AI Model API Endpoint</div>
+                <div className="text-white/40">// Recommendation API Endpoint</div>
                 <div>POST https://api.pgbeauty.ai/v1/recommend</div>
-                <div className="text-white/40 mt-1">// Request payload: customer_id, skin_type, concerns[], age_range</div>
+                <div className="text-white/40 mt-1">// Request payload: customer_id, product_ids, profile_signals</div>
                 <div className="text-white/40">// Response: &#123; products: [&#123; id, score, reason &#125;] &#125;</div>
               </div>
               <div className="flex gap-2 mt-3">
@@ -652,7 +753,7 @@ export function AdminRecommendations() {
                 <button
                   onClick={() => {
                     const nextActive = !rule.active;
-                    void supabase.from('recommendation_rules').update({ is_active: nextActive }).eq('id', rule.id);
+                    void supabase.from('recommendation_rules').update({ is_active: nextActive }).eq('rule_id', rule.id);
                     setRules(prev => prev.map((r, j) => j === i ? { ...r, active: nextActive } : r));
                   }}
                   className={`w-8 h-4 rounded-full flex-shrink-0 cursor-pointer transition-colors relative ${rule.active ? 'bg-[var(--primary)]' : 'bg-[var(--muted)]'}`}
@@ -670,7 +771,7 @@ export function AdminRecommendations() {
           </div>
         </div>
       </div>
-      <Modal open={endpointOpen} onClose={() => setEndpointOpen(false)} title="Configure AI Endpoint">
+      <Modal open={endpointOpen} onClose={() => setEndpointOpen(false)} title="Configure Recommendation Endpoint">
         <div className="flex flex-col gap-4">
           <Input label="API Endpoint URL" value={endpoint} onChange={e => setEndpoint(e.target.value)} />
           <Input label="API Key (Bearer Token)" type="password" placeholder="sk-••••••••••••••••" />
@@ -989,35 +1090,26 @@ export function AdminReports() {
   );
 }
 
-const SUPPORT_INQUIRIES_KEY = 'pgbeauty-support-inquiries';
-const SUPPORT_RESPONSES_KEY = 'pgbeauty-support-responses';
-
 async function fetchSupportInquiries() {
   if (!isSupabaseConfigured) {
-    return [];
+    throw new Error('Supabase is not configured, so support inquiries cannot be loaded.');
   }
 
-  try {
-    const { data, error } = await supabase.from('support_inquiries').select('*').order('created_at', { ascending: false });
-    if (error) {
-      return [];
-    }
+  const { data, error } = await supabase.from('support_inquiries').select('id:inquiry_id, customer_name, email, subject, status, channel, last_reply, sentiment, message, support_reply, created_at, user_id').order('created_at', { ascending: false });
+  if (error) throw error;
 
-    return (data ?? []).map((row: any) => ({
-      id: row.id,
-      customer: row.customer_name || row.customer || 'Customer',
-      email: row.email || 'customer@example.com',
-      subject: row.subject || 'Support inquiry',
-      status: row.status || 'Open',
-      channel: row.channel || 'Chat',
-      lastReply: row.last_reply || 'Just now',
-      sentiment: row.sentiment || 'Needs review',
-      message: row.message || '',
-      supportReply: row.support_reply || '',
-    }));
-  } catch {
-    return [];
-  }
+  return (data ?? []).map((row: any) => ({
+    id: row.id,
+    customer: row.customer_name || row.customer || 'Customer',
+    email: row.email || 'customer@example.com',
+    subject: row.subject || 'Support inquiry',
+    status: row.status || 'Open',
+    channel: row.channel || 'Chat',
+    lastReply: row.last_reply || 'Just now',
+    sentiment: row.sentiment || 'Needs review',
+    message: row.message || '',
+    supportReply: row.support_reply || '',
+  }));
 }
 
 async function saveSupportResponse(inquiryId: string, customer: string, email: string, replyText: string) {
@@ -1041,6 +1133,7 @@ async function saveSupportResponse(inquiryId: string, customer: string, email: s
 export function ContactUsReportPage() {
   const { add, remove, toasts } = useToast();
   const [messages, setMessages] = useState<any[]>([]);
+  const [loadError, setLoadError] = useState('');
   const [replyOpen, setReplyOpen] = useState(false);
   const [selectedInquiry, setSelectedInquiry] = useState<any>(null);
   const [replyText, setReplyText] = useState('Hi there, thanks for reaching out. We have reviewed your concern and will follow up shortly with a resolution.');
@@ -1048,7 +1141,12 @@ export function ContactUsReportPage() {
   useEffect(() => {
     let active = true;
     void fetchSupportInquiries().then((rows) => {
-      if (active) setMessages(rows);
+      if (active) {
+        setMessages(rows);
+        setLoadError('');
+      }
+    }).catch(error => {
+      if (active) setLoadError(error instanceof Error ? error.message : 'Unable to load support inquiries.');
     });
     return () => { active = false; };
   }, []);
@@ -1082,7 +1180,7 @@ export function ContactUsReportPage() {
           sentiment: 'Positive',
           last_reply: 'Just now',
           support_reply: replyText,
-        }).eq('id', selectedInquiry.id);
+        }).eq('inquiry_id', selectedInquiry.id);
       } catch {
         // ignore if table is unavailable
       }
@@ -1157,6 +1255,7 @@ export function ContactUsReportPage() {
             <p className="text-sm text-[var(--muted-foreground)]">Customer support conversations and message health</p>
           </div>
         </div>
+        {loadError && <p role="alert" className="text-sm text-red-600">Unable to load support inquiries: {loadError}</p>}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {summaryCards.map((item) => (
@@ -1173,6 +1272,7 @@ export function ContactUsReportPage() {
             columns={[
               { key: 'customer', label: 'Customer', render: (row: any) => <span className="font-medium">{row.customer}</span> },
               { key: 'subject', label: 'Subject' },
+              { key: 'message', label: 'Message', render: (row: any) => <span className="block max-w-[280px] truncate" title={row.message}>{row.message || '—'}</span> },
               { key: 'channel', label: 'Channel' },
               { key: 'status', label: 'Status', render: (row: any) => <Badge variant={row.status === 'Resolved' ? 'success' : row.status === 'Pending' ? 'warning' : row.status === 'New' ? 'info' : 'default'}>{row.status}</Badge> },
               { key: 'sentiment', label: 'Sentiment' },
@@ -1190,6 +1290,10 @@ export function ContactUsReportPage() {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Input label="To" value={selectedInquiry?.email ?? ''} readOnly />
             <Input label="Subject" value={selectedInquiry ? `Re: ${selectedInquiry.subject}` : ''} readOnly />
+          </div>
+          <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--secondary)]/50 p-3">
+            <div className="mb-1 text-xs font-semibold uppercase text-[var(--muted-foreground)]">Customer message</div>
+            <p className="whitespace-pre-wrap text-sm">{selectedInquiry?.message || 'No message provided.'}</p>
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium">Email response</label>
@@ -1210,77 +1314,109 @@ export function ContactUsReportPage() {
   );
 }
 
-// ─── User Management ──────────────────────────────────────────────────────────
-const adminUsers: any[] = [];
-
-const activityLog = [
-  { user: 'Super Admin', action: 'Added product: Vitamin E Serum', time: '10 min ago' },
-  { user: 'Beauty Admin', action: 'Updated inventory for Classic Cleanser', time: '1 hr ago' },
-  { user: 'Jane Staff', action: 'Created PO-2026-0091', time: '3 hr ago' },
-  { user: 'Beauty Admin', action: 'Exported Sales Report', time: 'Sept 20, 2026' },
-];
-
+// ─── User Management / User And Roles ──────────────────────────────────────────────────────────
 export function AdminUsers() {
+  const { user } = useAuth();
+  const { toasts, add: addToast, remove } = useToast();
   const [modalOpen, setModalOpen] = useState(false);
   const [userList, setUserList] = useState<any[]>([]);
-  useEffect(() => { void fetchAdminUsers().then(setUserList).catch(() => setUserList([])); }, []);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ firstName: '', lastName: '', email: '', role: 'beauty_staff' });
+  const roleOptions = [
+    { value: 'beauty_staff', label: 'Beauty Staff' },
+    { value: 'beauty_admin', label: 'Beauty Administrator' },
+    { value: 'super_admin', label: 'P&G Super Administrator' },
+  ];
+
+  const loadData = async () => {
+    try {
+      const users = await fetchAdminUsers();
+      setUserList(users);
+      setError('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to load users and activity.');
+    }
+  };
+  useEffect(() => { void loadData(); }, []);
+
+  const inviteUser = async () => {
+    if (!form.firstName.trim() || !form.lastName.trim() || !form.email.trim()) {
+      addToast('error', 'First name, last name, and email are required.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await manageUser({ action: 'invite', first_name: form.firstName.trim(), last_name: form.lastName.trim(), email: form.email.trim(), role: form.role });
+      addToast('success', 'Invitation sent.');
+      setModalOpen(false);
+      setForm({ firstName: '', lastName: '', email: '', role: 'beauty_staff' });
+      await loadData();
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to invite user.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const changeRole = async (target: any, role: string) => {
+    if (target.id === user?.id || target.role === role) return;
+    try {
+      await manageUser({ action: 'role', id: target.id, role });
+      addToast('success', 'User role updated.');
+      await loadData();
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to update user role.');
+    }
+  };
+
   return (
     <AdminSidebar>
+      <ToastContainer toasts={toasts} onRemove={remove} />
       <div className="flex flex-col gap-6 animate-fade-in">
         <div className="flex items-center justify-between">
-          <div><h1 className="text-xl font-bold">Users & Access</h1><p className="text-sm text-[var(--muted-foreground)]">Manage admin accounts and role permissions</p></div>
+          <div><h1 className="text-xl font-bold">Users and Roles</h1><p className="text-sm text-[var(--muted-foreground)]">Staff and administrator accounts only — customers are not listed here</p></div>
           <Button onClick={() => setModalOpen(true)}><Plus size={15} /> Add User</Button>
         </div>
+        {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <DataTable
             data={userList as any}
             columns={[
-              { key: 'name', label: 'Name', render: (row: any) => (
-                <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 rounded-full bg-[var(--primary)]/20 flex items-center justify-center text-xs font-bold text-[var(--primary)]">{row.name.split(' ').map((n: string) => n[0]).join('')}</div>
-                  <span className="font-medium text-sm">{row.name}</span>
-                </div>
-              )},
+              { key: 'name', label: 'Name' },
               { key: 'email', label: 'Email' },
               { key: 'role', label: 'Role', render: (row: any) => (
-                <Badge variant={row.role === 'Super Admin' ? 'rose' : row.role === 'Beauty Admin' ? 'info' : 'default'}>{row.role}</Badge>
+                <select
+                  value={row.role}
+                  disabled={row.id === user?.id}
+                  onChange={event => void changeRole(row, event.target.value)}
+                  aria-label={`Role for ${row.name}`}
+                  className="rounded border border-[var(--border)] bg-white px-2 py-1 text-xs disabled:bg-[var(--secondary)]"
+                >
+                  {roleOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
               )},
-              { key: 'status', label: 'Status', render: (row: any) => <Badge variant={row.status === 'Active' ? 'success' : 'muted'}>{row.status}</Badge> },
-              { key: 'lastLogin', label: 'Last Login' },
-              { key: 'edit', label: '', sortable: false, render: () => <button className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Edit2 size={14} /></button> },
+              { key: 'createdAt', label: 'Created', render: (row: any) => new Date(row.createdAt).toLocaleDateString() },
             ]}
           />
         </div>
 
-        {/* Activity Log */}
-        <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
-          <h2 className="font-semibold text-sm mb-4">Activity Log</h2>
-          <div className="flex flex-col gap-0">
-            {activityLog.map((log, i) => (
-              <div key={i} className="flex items-start gap-3 py-3 border-b border-[var(--border)] last:border-0 text-sm">
-                <div className="w-7 h-7 rounded-full bg-[var(--primary)]/20 flex items-center justify-center text-xs font-bold text-[var(--primary)] flex-shrink-0">{log.user.split(' ').map(n => n[0]).join('')}</div>
-                <div className="flex-1 min-w-0">
-                  <span className="font-medium">{log.user}</span>
-                  <span className="text-[var(--muted-foreground)]"> — {log.action}</span>
-                  <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{log.time}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Add Admin User">
+        <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Invite User">
           <div className="flex flex-col gap-4">
             <div className="grid grid-cols-2 gap-3">
-              <Input label="First Name" placeholder="Jane" />
-              <Input label="Last Name" placeholder="Doe" />
+              <Input label="First Name" value={form.firstName} onChange={event => setForm(previous => ({ ...previous, firstName: event.target.value }))} autoComplete="given-name" />
+              <Input label="Last Name" value={form.lastName} onChange={event => setForm(previous => ({ ...previous, lastName: event.target.value }))} autoComplete="family-name" />
             </div>
-            <Input label="Email" type="email" placeholder="jane@pgbeauty.com" />
-            <Select label="Role" options={[{ value: '', label: 'Select role…' }, { value: 'super_admin', label: 'Super Admin' }, { value: 'beauty_admin', label: 'Beauty Admin' }, { value: 'beauty_staff', label: 'Beauty Staff' }]} />
-            <Input label="Temporary Password" type="password" placeholder="••••••••" hint="User will be prompted to change on first login" />
+            <Input label="Email" type="email" value={form.email} onChange={event => setForm(previous => ({ ...previous, email: event.target.value }))} autoComplete="email" />
+            <label className="text-sm font-medium">Role
+              <select value={form.role} onChange={event => setForm(previous => ({ ...previous, role: event.target.value }))} className="mt-1.5 w-full rounded-[var(--radius)] border border-[var(--border)] bg-white px-3 py-2 text-sm">
+                {roleOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <p className="text-xs text-[var(--muted-foreground)]">Supabase Auth will send the account invitation email.</p>
             <div className="flex gap-3 mt-2">
               <Button variant="outline" onClick={() => setModalOpen(false)} className="flex-1">Cancel</Button>
-              <Button className="flex-1" onClick={() => setModalOpen(false)}>Create User</Button>
+              <Button className="flex-1" loading={saving} onClick={() => void inviteUser()}>Send Invitation</Button>
             </div>
           </div>
         </Modal>
@@ -1315,7 +1451,7 @@ export function AdminSettings() {
               {[
                 { label: 'Low stock alerts', desc: 'Get notified when products are running low' },
                 { label: 'New order notifications', desc: 'Alert on every new customer order' },
-                { label: 'AI model retraining', desc: 'Notify when recommendation model completes retraining' },
+                { label: 'Recommendation refresh', desc: 'Notify when the recommendation ranking refresh completes' },
                 { label: 'Weekly sales summary', desc: 'Receive weekly email digest of sales performance' },
               ].map(n => (
                 <div key={n.label} className="flex items-center justify-between p-4 border border-[var(--border)] rounded-[var(--radius-lg)]">

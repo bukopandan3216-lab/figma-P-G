@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Check, AlertCircle, Info, ChevronDown, ChevronUp, Search } from 'lucide-react';
+import { X, Check, AlertCircle, Info, ChevronDown, ChevronUp, Search, LoaderCircle } from 'lucide-react';
 
 // ─── Badge ────────────────────────────────────────────────────────────────────
 type BadgeVariant = 'default' | 'success' | 'warning' | 'danger' | 'info' | 'muted' | 'rose';
@@ -24,11 +24,11 @@ export function Badge({ variant = 'default', className = '', children }: { varia
 type BtnVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'danger';
 type BtnSize = 'sm' | 'md' | 'lg';
 const btnVariantStyles: Record<BtnVariant, string> = {
-  primary: 'bg-[var(--primary)] text-white hover:bg-[#9E5569] active:bg-[#8B4A5B] shadow-sm',
-  secondary: 'bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:bg-[var(--muted)]',
-  outline: 'border border-[var(--border)] text-[var(--foreground)] hover:bg-[var(--secondary)]',
-  ghost: 'text-[var(--foreground)] hover:bg-[var(--secondary)]',
-  danger: 'bg-red-600 text-white hover:bg-red-700',
+  primary: 'bg-[var(--primary)] text-white shadow-sm hover:bg-[#773447] hover:shadow-md active:bg-[#65283A]',
+  secondary: 'bg-[var(--secondary)] text-[var(--secondary-foreground)] hover:bg-[var(--muted)] hover:shadow-sm',
+  outline: 'border border-[var(--border)] text-[var(--foreground)] hover:border-[var(--primary)] hover:bg-[var(--secondary)] hover:shadow-sm',
+  ghost: 'text-[var(--foreground)] hover:bg-[var(--secondary)] hover:text-[var(--primary)]',
+  danger: 'bg-red-700 text-white hover:bg-red-800 hover:shadow-sm',
 };
 const btnSizeStyles: Record<BtnSize, string> = {
   sm: 'px-3 py-1.5 text-xs gap-1.5',
@@ -46,11 +46,20 @@ export function Button({
       type={type}
       disabled={disabled || loading}
       onClick={onClick}
-      className={`inline-flex items-center justify-center font-medium rounded-[var(--radius)] transition-all duration-150 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${btnVariantStyles[variant]} ${btnSizeStyles[size]} ${className}`}
+      className={`inline-flex items-center justify-center font-medium rounded-[var(--radius-inner)] transition-all duration-150 cursor-pointer select-none hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 disabled:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed ${btnVariantStyles[variant]} ${btnSizeStyles[size]} ${className}`}
     >
       {loading && <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />}
       {children}
     </button>
+  );
+}
+
+export function LoadingState({ message = 'Hang tight, we are getting things ready…', fullScreen = false }: { message?: string; fullScreen?: boolean }) {
+  return (
+    <div role="status" aria-live="polite" aria-busy="true" className={`flex flex-col items-center justify-center gap-3 text-center ${fullScreen ? 'min-h-screen bg-[var(--background)]' : 'min-h-32 py-8'}`}>
+      <LoaderCircle size={30} aria-hidden="true" className="animate-spin text-[var(--primary)]" />
+      <p className="text-sm text-[var(--muted-foreground)]">{message}</p>
+    </div>
   );
 }
 
@@ -67,7 +76,7 @@ export function Input({
         {icon && <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]">{icon}</span>}
         <input
           {...props}
-          className={`w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] focus:border-transparent transition-all ${icon ? 'pl-10' : ''} ${error ? 'border-red-500 focus:ring-red-500' : ''}`}
+          className={`w-full rounded-[var(--radius-inner)] border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] focus:border-transparent transition-all ${icon ? 'pl-10' : ''} ${error ? 'border-red-500 focus:ring-red-500' : ''}`}
         />
       </div>
       {error && <p className="text-xs text-red-600 flex items-center gap-1"><AlertCircle size={12} />{error}</p>}
@@ -171,7 +180,7 @@ export interface Column<T> {
 export function DataTable<T extends Record<string, unknown>>({
   columns, data, emptyMessage = 'No records found',
 }: {
-  columns: Column<T>[]; data: T[]; emptyMessage?: string;
+  columns: Column<T>[]; data: T[]; emptyMessage?: React.ReactNode;
 }) {
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -236,6 +245,21 @@ export function DataTable<T extends Record<string, unknown>>({
     return `row-${index}`;
   };
 
+  // Keys must be unique even when the source data repeats an id (a row that
+  // appears in two report branches, for example), so any collision gets a
+  // stable numeric suffix instead of letting React guess.
+  const rowKeys = (() => {
+    const seen = new Set<string>();
+    return rows.map((row, i) => {
+      const base = getRowKey(row, i);
+      let key = base;
+      let attempt = 1;
+      while (seen.has(key)) key = `${base}~${attempt++}`;
+      seen.add(key);
+      return key;
+    });
+  })();
+
   return (
     <div className="flex flex-col gap-3">
       <div className="relative w-full max-w-xs">
@@ -269,9 +293,9 @@ export function DataTable<T extends Record<string, unknown>>({
             {rows.length === 0 ? (
               <tr><td colSpan={columns.length} className="px-4 py-12 text-center text-[var(--muted-foreground)]">{emptyMessage}</td></tr>
             ) : rows.map((row, i) => (
-              <tr key={getRowKey(row, i)} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--secondary)] transition-colors">
+              <tr key={rowKeys[i]} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--secondary)] transition-colors">
                 {columns.map(col => (
-                  <td key={`${getRowKey(row, i)}-${String(col.key)}`} className="px-4 py-3 text-[var(--foreground)]">
+                  <td key={`${rowKeys[i]}-${String(col.key)}`} className="px-4 py-3 text-[var(--foreground)]">
                     {col.render ? col.render(row) : String(row[col.key as keyof T] ?? '')}
                   </td>
                 ))}
@@ -392,15 +416,90 @@ export function Breadcrumb({ items }: { items: { label: string; href?: string }[
 export function RangeSlider({ min, max, value, onChange, label }: {
   min: number; max: number; value: [number, number]; onChange: (v: [number, number]) => void; label?: string;
 }) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState<0 | 1 | null>(null);
+  const span = Math.max(1, max - min);
+  const step = Math.max(1, Math.round(span / 100));
+
+  const clamp = (n: number) => Math.min(max, Math.max(min, Math.round(n)));
+  const pos = (n: number) => `${((n - min) / span) * 100}%`;
+
+  const valueAt = (clientX: number) => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || !rect.width) return value[0];
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    return clamp(min + ratio * span);
+  };
+
+  const nearestThumb = (clientX: number): 0 | 1 => {
+    const next = valueAt(clientX);
+    return next - value[0] <= value[1] - next ? 0 : 1;
+  };
+
+  const applyThumb = (index: 0 | 1, next: number) => {
+    if (index === 0) onChange([Math.min(next, value[1]), value[1]]);
+    else onChange([value[0], Math.max(next, value[0])]);
+  };
+
+  useEffect(() => {
+    if (dragging === null) return;
+    const onMove = (event: PointerEvent) => applyThumb(dragging, valueAt(event.clientX));
+    const onUp = () => setDragging(null);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  });
+
+  const handleThumbKeyDown = (index: 0 | 1) => (event: React.KeyboardEvent) => {
+    const current = value[index];
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') { event.preventDefault(); applyThumb(index, current - step); }
+    else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') { event.preventDefault(); applyThumb(index, current + step); }
+    else if (event.key === 'Home') { event.preventDefault(); applyThumb(index, min); }
+    else if (event.key === 'End') { event.preventDefault(); applyThumb(index, max); }
+  };
+
+  const thumb = (index: 0 | 1) => (
+    <button
+      type="button"
+      role="slider"
+      aria-label={`${label || 'Price'} ${index === 0 ? 'minimum' : 'maximum'}`}
+      aria-valuemin={index === 0 ? min : value[0]}
+      aria-valuemax={index === 0 ? value[1] : max}
+      aria-valuenow={value[index]}
+      aria-valuetext={`₱${value[index].toLocaleString('en-PH')}`}
+      onKeyDown={handleThumbKeyDown(index)}
+      onPointerDown={event => { event.preventDefault(); event.stopPropagation(); setDragging(index); }}
+      style={{ left: pos(value[index]) }}
+      className="absolute top-1/2 z-10 h-4 w-4 -translate-x-1/2 -translate-y-1/2 cursor-grab rounded-full border-2 border-[var(--primary)] bg-white shadow transition-transform hover:scale-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] active:scale-110 active:cursor-grabbing"
+    />
+  );
+
   return (
     <div className="flex flex-col gap-2">
       {label && <label className="text-sm font-medium">{label}</label>}
-      <div className="relative h-5 flex items-center">
-        <input type="range" min={min} max={max} value={value[0]} onChange={e => onChange([Math.min(+e.target.value, value[1]), value[1]])} className="absolute inset-0 w-full accent-[var(--primary)] pointer-events-auto" aria-label="Minimum price" />
-        <input type="range" min={min} max={max} value={value[1]} onChange={e => onChange([value[0], Math.max(+e.target.value, value[0])])} className="absolute inset-0 w-full accent-[var(--primary)] pointer-events-auto" aria-label="Maximum price" />
+      <div
+        ref={trackRef}
+        onPointerDown={event => {
+          const index = nearestThumb(event.clientX);
+          setDragging(index);
+          applyThumb(index, valueAt(event.clientX));
+        }}
+        className="relative flex h-5 cursor-pointer touch-none select-none items-center"
+      >
+        <div className="absolute inset-x-0 h-1 rounded-full bg-[var(--muted)]" />
+        <div
+          className="absolute h-1 rounded-full bg-[var(--primary)]"
+          style={{ left: pos(value[0]), right: `calc(100% - ${pos(value[1])})` }}
+        />
+        {thumb(0)}
+        {thumb(1)}
       </div>
       <div className="flex justify-between text-xs text-[var(--muted-foreground)]">
-        <span>${value[0]}</span><span>${value[1]}</span>
+        <span>₱{value[0].toLocaleString('en-PH')}</span>
+        <span>₱{value[1].toLocaleString('en-PH')}</span>
       </div>
     </div>
   );

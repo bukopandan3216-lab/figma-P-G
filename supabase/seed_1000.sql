@@ -7,7 +7,7 @@
 begin;
 
 update public.profiles
-set role = 'Super Admin'
+set role = 'super_admin'
 where lower(email) = lower('bukopandan3216@gmail.com');
 
 delete from public.payments;
@@ -15,6 +15,9 @@ delete from public.order_items;
 delete from public.orders;
 delete from public.cart_items;
 delete from public.wishlist_items;
+delete from public.recommendations;
+delete from public.customer_product_interactions;
+delete from public.user_activity_log;
 delete from public.inventory_movements;
 delete from public.purchase_order_items;
 delete from public.purchase_orders;
@@ -26,26 +29,28 @@ delete from public.suppliers;
 delete from public.categories;
 delete from public.brands;
 delete from public.profiles
-where role not in ('Super Admin', 'Beauty Admin', 'Beauty Staff')
+where role not in ('super_admin', 'beauty_admin', 'beauty_staff', 'customer')
   and lower(coalesce(email, '')) <> lower('bukopandan3216@gmail.com');
 
-insert into public.profiles (id, full_name, email, role)
+insert into public.profiles (id, first_name, last_name, email, role)
 select
   auth_user.id,
-  coalesce(nullif(auth_user.raw_user_meta_data ->> 'full_name', ''), split_part(coalesce(auth_user.email, ''), '@', 1)),
+  coalesce(nullif(auth_user.raw_user_meta_data ->> 'first_name', ''), split_part(coalesce(auth_user.raw_user_meta_data ->> 'full_name', ''), ' ', 1), split_part(coalesce(auth_user.email, ''), '@', 1)),
+  coalesce(nullif(auth_user.raw_user_meta_data ->> 'last_name', ''), nullif(regexp_replace(coalesce(auth_user.raw_user_meta_data ->> 'full_name', ''), '^\S+\s*', ''), ''), ''),
   auth_user.email,
-  coalesce(existing.role, 'Customer')
+  coalesce(existing.role, 'customer')
 from auth.users auth_user
 left join public.profiles existing on existing.id = auth_user.id
-where existing.role in ('Super Admin', 'Beauty Admin', 'Beauty Staff')
+where existing.role in ('super_admin', 'beauty_admin', 'beauty_staff')
   or lower(auth_user.email) = lower('bukopandan3216@gmail.com')
 on conflict (id) do update
-set full_name = excluded.full_name,
+set first_name = excluded.first_name,
+    last_name = excluded.last_name,
     email = excluded.email,
     role = excluded.role;
 
 update public.profiles
-set role = 'Super Admin'
+set role = 'super_admin'
 where lower(email) = lower('bukopandan3216@gmail.com');
 
 insert into public.brands (name, description) values
@@ -152,14 +157,14 @@ where not exists (
 
 insert into public.cart_items (user_id, product_id, quantity, variant_id)
 select admin_profile.id, product.id, 1, variant.id
-from (select id from public.profiles where role = 'Super Admin' order by created_at limit 1) admin_profile
+from (select id from public.profiles where role = 'super_admin' order by created_at limit 1) admin_profile
 cross join lateral (select id from public.products where name = 'Regenerist Micro-Sculpting Cream' limit 1) product
 join lateral (select id from public.product_variants where product_id = product.id order by sku limit 1) variant on true
 on conflict (user_id, product_id) do update set quantity = excluded.quantity, variant_id = excluded.variant_id;
 
 insert into public.wishlist_items (user_id, product_id)
 select admin_profile.id, product.id
-from (select id from public.profiles where role = 'Super Admin' order by created_at limit 1) admin_profile
+from (select id from public.profiles where role = 'super_admin' order by created_at limit 1) admin_profile
 join public.products product on product.name in ('Facial Treatment Essence', 'Pro 1000 Rechargeable Electric Toothbrush')
 on conflict do nothing;
 
@@ -178,7 +183,7 @@ where not exists (select 1 from public.suppliers existing where existing.name = 
 insert into public.purchase_orders (created_by, supplier_id, status, total_cost, created_at)
 select admin_profile.id, supplier.id, status.value, total.value, now() - days.value * interval '1 day'
 from public.suppliers supplier
-cross join lateral (select id from public.profiles where role in ('Super Admin', 'Beauty Admin', 'Beauty Staff') order by created_at limit 1) admin_profile
+cross join lateral (select id from public.profiles where role in ('super_admin', 'beauty_admin', 'beauty_staff') order by created_at limit 1) admin_profile
 cross join lateral (values ('Received'), ('Approved'), ('Shipped'), ('Pending')) status(value)
 cross join lateral (values (round((850 + abs(hashtext(supplier.name || status.value)) % 18000)::numeric, 2))) total(value)
 cross join lateral (values (abs(hashtext(supplier.name || status.value)) % 90)) days(value)
@@ -207,11 +212,11 @@ where not exists (select 1 from public.recommendation_rules existing where exist
 
 -- Keep analytics populated after the reset. These records belong to the preserved admin profile.
 insert into public.orders (user_id, total_amount, subtotal, shipping_fee, tax, status, payment_status, payment_method, shipping_name, shipping_email, shipping_address, shipping_city, shipping_zip, shipping_country, created_at)
-select profile.id, round((product.price + product.price * 0.12)::numeric, 2), product.price, 0, round((product.price * 0.12)::numeric, 2), order_state.status, order_state.payment_status, 'seeded_historical_card', profile.full_name, coalesce(profile.email, ''), order_state.address, 'Makati City', '1200', 'Philippines', now() - order_state.days_ago * interval '1 day'
-from (select * from public.profiles where role in ('Super Admin', 'Beauty Admin', 'Beauty Staff') order by created_at limit 1) profile
+select profile.id, round((product.price + product.price * 0.12)::numeric, 2), product.price, 0, round((product.price * 0.12)::numeric, 2), order_state.status, order_state.payment_status, 'seeded_historical_card', nullif(concat_ws(' ', nullif(profile.first_name, ''), nullif(profile.last_name, '')), ''), coalesce(profile.email, ''), order_state.address, 'Makati City', '1200', 'Philippines', now() - order_state.days_ago * interval '1 day'
+from (select * from public.profiles where role in ('super_admin', 'beauty_admin', 'beauty_staff') order by created_at limit 1) profile
 cross join lateral (values ('Delivered','Paid',15,'12 Ayala Avenue'), ('Delivered','Paid',32,'24 Legazpi Village'), ('Processing','Unpaid',4,'8 Jupiter Street')) order_state(status, payment_status, days_ago, address)
 cross join lateral (select p.price, p.id from public.products p where p.status = 'Active' order by md5(order_state.address || p.id::text) limit 1) product
-where profile.role in ('Super Admin', 'Beauty Admin', 'Beauty Staff')
+where profile.role in ('super_admin', 'beauty_admin', 'beauty_staff')
 and not exists (select 1 from public.orders existing where existing.user_id = profile.id and existing.shipping_address = order_state.address);
 
 insert into public.order_items (order_id, variant_id, quantity, price_at_purchase)

@@ -5,9 +5,21 @@ import { useCart } from '../../context/AppContext';
 import { Button, Input, Stepper, Breadcrumb } from '../../components/ui';
 import CustomerNav from '../../components/CustomerNav';
 import { useAuth } from '../../context/AuthContext';
-import { createOrder } from '../../lib/catalog';
+import { createOrder, FREE_SHIPPING_THRESHOLD, SHIPPING_FEE, VAT_RATE } from '../../lib/catalog';
+import { safeImage } from '../../lib/image';
 
 const STEPS = ['Shipping', 'Payment', 'Confirmation'];
+
+const peso = (amount: number) => `₱${amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+function deliveryWindow() {
+  const format = (date: Date) => date.toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' });
+  const start = new Date();
+  start.setDate(start.getDate() + 2);
+  const end = new Date();
+  end.setDate(end.getDate() + 5);
+  return `${format(start)} – ${format(end)}`;
+}
 
 type SavedAddress = {
   id: string;
@@ -58,6 +70,9 @@ export default function CartCheckoutPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [orderNumber, setOrderNumber] = useState('');
+  const shippingFee = cartTotal >= FREE_SHIPPING_THRESHOLD ? 0 : SHIPPING_FEE;
+  const tax = cartTotal * VAT_RATE;
+  const grandTotal = cartTotal + shippingFee + tax;
 
   useEffect(() => {
     const savedAddresses = readStoredAddresses();
@@ -133,7 +148,7 @@ export default function CartCheckoutPage() {
             <div className="lg:col-span-2 flex flex-col gap-3">
               {cart.map(item => (
                 <div key={item.id} className="flex items-center gap-4 bg-white p-4 rounded-[var(--radius-xl)] border border-[var(--border)]">
-                  <img src={item.image} alt={item.name} className="w-20 h-20 object-cover rounded-[var(--radius-lg)] bg-[var(--secondary)] flex-shrink-0" />
+                  <img src={safeImage(item.image, item.name)} alt={item.name} className="w-20 h-20 object-cover rounded-[var(--radius-lg)] bg-[var(--secondary)] flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="text-xs text-[var(--muted-foreground)] mb-0.5">{item.brand}</div>
                     <div className="text-sm font-semibold line-clamp-2">{item.name}</div>
@@ -145,7 +160,7 @@ export default function CartCheckoutPage() {
                         <button onClick={() => updateQty(item.id, item.qty + 1)} className="w-7 h-7 flex items-center justify-center hover:bg-[var(--secondary)] text-sm font-medium">+</button>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className="font-bold">${(item.price * item.qty).toFixed(2)}</span>
+                        <span className="font-bold">{peso(item.price * item.qty)}</span>
                         <button onClick={() => removeFromCart(item.id)} className="text-[var(--muted-foreground)] hover:text-red-500 transition-colors"><Trash2 size={15} /></button>
                       </div>
                     </div>
@@ -156,14 +171,14 @@ export default function CartCheckoutPage() {
             <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5 h-fit sticky top-24">
               <h2 className="font-semibold mb-4">Order Summary</h2>
               <div className="flex flex-col gap-2 text-sm mb-4">
-                <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">Subtotal ({cartCount} items)</span><span>${cartTotal.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">Shipping</span><span className="text-emerald-600">{cartTotal >= 35 ? 'Free' : '$4.99'}</span></div>
-                <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">Tax</span><span>${(cartTotal * 0.12).toFixed(2)}</span></div>
+                <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">Subtotal ({cartCount} items)</span><span>{peso(cartTotal)}</span></div>
+                <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">Shipping</span><span className="text-emerald-600">{shippingFee === 0 ? 'Free' : peso(shippingFee)}</span></div>
+                <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">VAT (12%)</span><span>{peso(tax)}</span></div>
               </div>
               <div className="border-t border-[var(--border)] pt-3 mb-4">
-                <div className="flex justify-between font-bold text-base"><span>Total</span><span>${(cartTotal + (cartTotal >= 35 ? 0 : 4.99) + cartTotal * 0.12).toFixed(2)}</span></div>
+                <div className="flex justify-between font-bold text-base"><span>Total</span><span>{peso(grandTotal)}</span></div>
               </div>
-              {cartTotal < 35 && <p className="text-xs text-[var(--muted-foreground)] mb-3">Add ${(35 - cartTotal).toFixed(2)} more for free shipping!</p>}
+              {shippingFee > 0 && <p className="text-xs text-[var(--muted-foreground)] mb-3">Add {peso(FREE_SHIPPING_THRESHOLD - cartTotal)} more for free shipping!</p>}
               <Button className="w-full" size="lg" onClick={() => setView('checkout')}>Proceed to Checkout</Button>
               <div className="mt-3 flex items-center justify-center gap-2 text-xs text-[var(--muted-foreground)]">
                 <CreditCard size={12} /> Secure checkout
@@ -189,11 +204,11 @@ export default function CartCheckoutPage() {
             {step === 0 && (
               <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-6">
                 <h2 className="font-semibold mb-4 flex items-center gap-2"><MapPin size={16} className="text-[var(--primary)]" /> Shipping Information</h2>
-                <div className="grid grid-cols-2 gap-4">
-                  <Input label="Full Name" placeholder="Maria Santos" value={shipping.name} onChange={e => setShipping(p => ({ ...p, name: e.target.value }))} className="col-span-2" />
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Input label="Full Name" placeholder="Maria Santos" value={shipping.name} onChange={e => setShipping(p => ({ ...p, name: e.target.value }))} className="sm:col-span-2" />
                   <Input label="Email" type="email" placeholder="maria@email.com" value={shipping.email} onChange={e => setShipping(p => ({ ...p, email: e.target.value }))} />
                   <Input label="Phone" placeholder="+63 912 345 6789" value={shipping.phone} onChange={e => setShipping(p => ({ ...p, phone: e.target.value }))} />
-                  <Input label="Street Address" placeholder="123 Rizal St." value={shipping.address} onChange={e => setShipping(p => ({ ...p, address: e.target.value }))} className="col-span-2" />
+                  <Input label="Street Address" placeholder="123 Rizal St." value={shipping.address} onChange={e => setShipping(p => ({ ...p, address: e.target.value }))} className="sm:col-span-2" />
                   <Input label="City" placeholder="Makati City" value={shipping.city} onChange={e => setShipping(p => ({ ...p, city: e.target.value }))} />
                   <Input label="ZIP Code" placeholder="1220" value={shipping.zip} onChange={e => setShipping(p => ({ ...p, zip: e.target.value }))} />
                 </div>
@@ -213,7 +228,7 @@ export default function CartCheckoutPage() {
                     <p className="text-xs text-[var(--muted-foreground)]">Card details are sent to the payment provider and are never stored in P&G Beauty.</p>
                     <Input label="Cardholder Name" placeholder="Maria Santos" value={payment.name} onChange={e => setPayment(p => ({ ...p, name: e.target.value }))} />
                     <Input label="Card Number" placeholder="1234 5678 9012 3456" value={payment.card} onChange={e => setPayment(p => ({ ...p, card: e.target.value }))} />
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                       <Input label="Expiry" placeholder="MM / YY" value={payment.expiry} onChange={e => setPayment(p => ({ ...p, expiry: e.target.value }))} />
                       <Input label="CVV" placeholder="123" value={payment.cvv} onChange={e => setPayment(p => ({ ...p, cvv: e.target.value }))} />
                     </div>
@@ -236,7 +251,7 @@ export default function CartCheckoutPage() {
                 <p className="text-[var(--muted-foreground)] text-sm mb-6">A confirmation email has been sent to {shipping.email || 'your email'}.</p>
                 <div className="bg-[var(--secondary)] rounded-[var(--radius-lg)] p-4 mb-6 text-left">
                   <div className="flex items-center gap-2 text-sm font-medium mb-2"><Package size={14} className="text-[var(--primary)]" /> Estimated Delivery</div>
-                  <p className="text-sm text-[var(--muted-foreground)]">Sept 24–26, 2026</p>
+                  <p className="text-sm text-[var(--muted-foreground)]">{deliveryWindow()}</p>
                   <p className="text-xs text-[var(--muted-foreground)] mt-1">Shipping to {shipping.address || 'your address'}</p>
                 </div>
                 <div className="flex gap-3">
@@ -254,14 +269,19 @@ export default function CartCheckoutPage() {
               <div className="flex flex-col gap-2 mb-3">
                 {cart.map(item => (
                   <div key={item.id} className="flex items-center gap-2 text-xs">
-                    <img src={item.image} alt="" className="w-8 h-8 object-cover rounded bg-[var(--secondary)] flex-shrink-0" />
+                    <img src={safeImage(item.image, item.name)} alt="" className="w-8 h-8 object-cover rounded bg-[var(--secondary)] flex-shrink-0" />
                     <span className="flex-1 truncate">{item.name}</span>
-                    <span className="font-medium flex-shrink-0">${(item.price * item.qty).toFixed(2)}</span>
+                    <span className="font-medium flex-shrink-0">{peso(item.price * item.qty)}</span>
                   </div>
                 ))}
               </div>
               <div className="border-t border-[var(--border)] pt-3 text-sm">
-                <div className="flex justify-between font-bold"><span>Total</span><span>${(cartTotal * 1.12).toFixed(2)}</span></div>
+                <div className="flex flex-col gap-2 text-sm">
+                  <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">Subtotal</span><span>{peso(cartTotal)}</span></div>
+                  <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">Shipping</span><span className="text-emerald-600">{shippingFee === 0 ? 'Free' : peso(shippingFee)}</span></div>
+                  <div className="flex justify-between"><span className="text-[var(--muted-foreground)]">VAT (12%)</span><span>{peso(tax)}</span></div>
+                </div>
+                <div className="flex justify-between font-bold mt-3 pt-3 border-t border-[var(--border)]"><span>Total</span><span>{peso(grandTotal)}</span></div>
               </div>
             </div>
           </div>

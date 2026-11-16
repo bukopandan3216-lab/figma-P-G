@@ -5,6 +5,11 @@ export interface Product {
   category: string;
   price: number;
   originalPrice?: number;
+  salePrice?: number | null;
+  discountType?: 'percentage' | 'fixed' | null;
+  discountValue?: number | null;
+  discountStart?: string | null;
+  discountEnd?: string | null;
   rating: number;
   reviews: number;
   image: string;
@@ -13,7 +18,10 @@ export interface Product {
   tags: string[];
   inStock: boolean;
   stock: number;
+  status?: 'Active' | 'Archived' | 'Draft';
   variants?: { label: string; options: string[] }[];
   variantId?: string;
+  variantName?: string;
+  supplier?: string;
   badge?: string;
 }

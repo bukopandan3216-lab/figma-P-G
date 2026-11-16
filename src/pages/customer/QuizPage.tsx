@@ -111,8 +111,10 @@ export default function QuizPage() {
   const [answers, setAnswers] = useState<(string | string[])[]>(Array(steps.length).fill(null));
   const [done, setDone] = useState(false);
   const [additionalConcern, setAdditionalConcern] = useState('');
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileSaveError, setProfileSaveError] = useState('');
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
 
   //added
   const concern = answers[0] as string;
@@ -196,7 +198,14 @@ const answer = answers[steps.findIndex((s) => s.id === current.id)];
    // else setDone(true);
   //};
 
-  const persistQuizProfile = () => {
+  const persistQuizProfile = async () => {
+    if (!user?.id) {
+      setProfileSaveError('Sign in to save your profile to your account.');
+      return;
+    }
+
+    setSavingProfile(true);
+    setProfileSaveError('');
     const profile = {
       concern: answers[0] || null,
       skinType: answers[steps.findIndex((s) => s.id === 'skinType')] || null,
@@ -209,17 +218,34 @@ const answer = answers[steps.findIndex((s) => s.id === current.id)];
       updatedAt: new Date().toISOString(),
     };
 
-    const history = JSON.parse(localStorage.getItem('pgbeauty-quiz-history') || '[]');
-    const nextHistory = [
-      ...history.filter((item: any) => item.updatedAt !== profile.updatedAt),
-      profile,
-    ];
+    let savedToDatabase = false;
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ skin_profile: profile })
+        .eq('user_id', user.id)
+        .select('user_id')
+        .single();
+      if (error) throw error;
+      savedToDatabase = true;
 
-    localStorage.setItem('pgbeauty-ai-profile', JSON.stringify(profile));
-    localStorage.setItem('pgbeauty-quiz-history', JSON.stringify(nextHistory));
+      const history = JSON.parse(localStorage.getItem('pgbeauty-quiz-history') || '[]');
+      const nextHistory = [
+        ...history.filter((item: any) => item.updatedAt !== profile.updatedAt),
+        profile,
+      ];
 
-    if (user?.id && supabase) {
-      void supabase.from('profiles').update({ skin_profile: profile }).eq('id', user.id);
+      localStorage.setItem('pgbeauty-profile', JSON.stringify(profile));
+      localStorage.setItem('pgbeauty-quiz-history', JSON.stringify(nextHistory));
+      await refreshUser().catch(() => undefined);
+      navigate('/for-you');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Please try again.';
+      setProfileSaveError(savedToDatabase
+        ? `Your profile was saved to your account, but local recommendations could not be updated. ${message}`
+        : `Unable to save your profile to your account. ${message}`);
+    } finally {
+      setSavingProfile(false);
     }
   };
 
@@ -264,13 +290,8 @@ const answer = answers[steps.findIndex((s) => s.id === current.id)];
           />
         </div>
 
-        <Button
-          size="lg"
-          onClick={() => {
-            persistQuizProfile();
-            navigate('/for-you');
-          }}
-        >
+        {profileSaveError && <p role="alert" className="mb-4 text-sm text-red-600">{profileSaveError}</p>}
+        <Button size="lg" loading={savingProfile} onClick={() => void persistQuizProfile()}>
           View My Recommendations <ArrowRight size={16} />
         </Button>
       </div>

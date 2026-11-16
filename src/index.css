@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Outfit:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Serif+Display:ital@0;1&family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500&display=swap');
 @import 'tailwindcss';
 
 @theme inline {
@@ -23,6 +23,7 @@
   --radius-md: var(--radius);
   --radius-lg: calc(var(--radius) + 4px);
   --radius-xl: calc(var(--radius) + 8px);
+  --radius-inner: calc(var(--radius-xl) - var(--radius-inner-padding));
   --font-display: var(--font-serif);
   --font-body: var(--font-sans);
   --font-mono: var(--font-mono-family);
@@ -33,23 +34,44 @@
   --foreground: #1C1917;
   --card: #FFFFFF;
   --card-foreground: #1C1917;
-  --primary: #B5697A;
+  --primary: #8F4055;
   --primary-foreground: #FFFFFF;
   --secondary: #F5F0EE;
   --secondary-foreground: #44403C;
   --muted: #EDE8E3;
-  --muted-foreground: #78716C;
-  --accent: #B5697A;
+  --muted-foreground: #625B56;
+  --accent: #8F4055;
   --accent-foreground: #FFFFFF;
   --border: #E8E0DA;
-  --ring: #B5697A;
-  --rose: #B5697A;
+  --ring: #8F4055;
+  --rose: #8F4055;
   --rose-light: #F9EEF1;
   --slate-admin: #1B2436;
   --radius: 10px;
+  --radius-inner-padding: 8px;
   --font-serif: 'DM Serif Display', Georgia, serif;
   --font-sans: 'Outfit', system-ui, sans-serif;
   --font-mono-family: 'DM Mono', 'Courier New', monospace;
+}
+
+.storefront-theme {
+  --background: #ffffff;
+  --foreground: #1c1917;
+  --primary: #9e2a4b;
+  --primary-foreground: #ffffff;
+  --secondary: #f9f1f3;
+  --secondary-foreground: #44403c;
+  --border: #e7dce0;
+  --ring: #9e2a4b;
+  --accent: #9e2a4b;
+  --accent-foreground: #ffffff;
+  --rose: #9e2a4b;
+  --rose-light: #fbecf0;
+  --font-serif: 'Playfair Display', Georgia, serif;
+  --font-sans: 'Inter', system-ui, sans-serif;
+  font-family: var(--font-sans);
+  color: var(--foreground);
+  background-color: var(--background);
 }
 
 * {

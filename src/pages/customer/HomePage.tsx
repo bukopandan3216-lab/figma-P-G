@@ -1,27 +1,33 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Sparkles, Zap, Shield, Truck } from 'lucide-react';
+import { ArrowRight, Sparkles, Zap, Shield, Truck, Heart, ChevronLeft, ChevronRight } from 'lucide-react';
 import type { Product } from '../../data/products';
 import { useCatalog } from '../../context/CatalogContext';
 import { useCart } from '../../context/AppContext';
-import { Badge, Button, StarRating } from '../../components/ui';
+import { useAuth } from '../../context/AuthContext';
+import { recommendProducts } from '../../lib/recommendations';
+import { Badge, Button, StarRating, LoadingState } from '../../components/ui';
 import CustomerNav from '../../components/CustomerNav';
+import CustomerFooter from '../../components/CustomerFooter';
 import ProductModal from '../../components/ProductModal';
+import { safeImage } from '../../lib/image';
 
 function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Product) => void }) {
   const { addToCart, toggleWishlist, wishlist } = useCart();
   const wished = wishlist.includes(product.id);
+  const displayPrice = product.price;
+  const hasReviews = product.reviews > 0;
 
   return (
-    <div className="group bg-white rounded-xl border border-border overflow-hidden hover:shadow-lg transition-all duration-300">
+    <article className="group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border)] bg-white transition-all duration-200 hover:-translate-y-1 hover:shadow-md">
       <div
         role="button"
         tabIndex={0}
-        className="block w-full text-left relative aspect-square overflow-hidden bg--secondary"
+        className="relative block aspect-square w-full cursor-pointer overflow-hidden bg-[var(--secondary)] text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
         onClick={() => onExpand(product)}
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onExpand(product); } }}
       >
-        <img src={product.image} alt={product.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+        <img src={safeImage(product.image, product.name)} alt={product.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
         {product.badge && (
           <div className="absolute top-3 left-3">
             <Badge variant={product.badge === 'Almost Sold Out' ? 'warning' : product.badge === 'Sale' ? 'danger' : 'rose'}>{product.badge}</Badge>
@@ -33,44 +39,56 @@ function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Pr
           </div>
         )}
         <button
+          type="button"
           onClick={e => { e.stopPropagation(); toggleWishlist(product.id); }}
-          className={`absolute top-3 right-3 w-8 h-8 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-sm transition-all hover:bg-white ${wished ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+          aria-label={`${wished ? 'Remove' : 'Add'} ${product.name} ${wished ? 'from' : 'to'} wishlist`}
+          className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white text-[var(--primary)] shadow-sm transition-colors hover:bg-[var(--secondary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill={wished ? '#B5697A' : 'none'} stroke="#B5697A" strokeWidth="2">
-            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
-          </svg>
+          <Heart size={16} fill={wished ? 'currentColor' : 'none'} aria-hidden="true" />
         </button>
       </div>
-      <div className="p-4">
-        <div className="text-xs text-muted-foreground mb-1 font-medium">{product.brand}</div>
-        <button onClick={() => onExpand(product)} className="text-sm font-semibold text-foreground line-clamp-2 hover:text-primary transition-colors leading-snug text-left w-full">{product.name}</button>
-        <div className="flex items-center gap-1.5 mt-1.5">
-          <StarRating rating={product.rating} />
-          <span className="text-xs text-muted-foreground">({product.reviews.toLocaleString()})</span>
+      <div className="flex flex-1 flex-col justify-between p-4">
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--primary)]">{product.brand}</div>
+          <button onClick={() => onExpand(product)} className="w-full text-left text-sm font-semibold leading-snug text-foreground transition-colors hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] line-clamp-2">{product.name}</button>
         </div>
-        <div className="flex items-center justify-between mt-3">
-          <div className="flex items-center gap-2">
-            <span className="text-base font-bold text-foreground">${product.price.toFixed(2)}</span>
-            {product.originalPrice && <span className="text-xs text-muted-foreground line-through">${product.originalPrice.toFixed(2)}</span>}
-          </div>
-          <Button
-            size="sm"
-            onClick={e => { addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock }); }}
-            disabled={!product.inStock}
-          >
-            Add
-          </Button>
+        <div className="mt-4 flex items-center justify-between border-t border-[var(--border)] pt-3">
+          <span className="text-sm font-bold text-foreground">₱{displayPrice.toFixed(2)}{product.originalPrice != null && <span className="ml-2 text-xs font-normal text-muted-foreground line-through">₱{product.originalPrice.toFixed(2)}</span>}</span>
+          {hasReviews && (
+            <div className="flex items-center gap-1 text-xs font-medium text-[var(--foreground)]/75">
+              <StarRating rating={product.rating} />
+              <span>({product.reviews.toLocaleString()})</span>
+            </div>
+          )}
         </div>
+        <Button size="sm" className="mt-3 w-full" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: displayPrice, image: product.image, stock: product.stock, inStock: product.inStock })} disabled={!product.inStock}>Add</Button>
       </div>
-    </div>
+    </article>
   );
 }
 
 export default function HomePage() {
   const [modalProduct, setModalProduct] = useState<Product | null>(null);
   const { products, categories, loading, error } = useCatalog();
+  const { user } = useAuth();
+  const trendingRef = useRef<HTMLDivElement>(null);
+  const [recommendations, setRecommendations] = useState<Product[]>([]);
   const trending = products.filter(p => p.badge === 'Almost Sold Out' || p.badge === 'Best Seller');
-  const recommended = products.slice(0, 4);
+
+  // The personalized shelf is unlocked only after the beauty quiz is completed.
+  const hasQuiz = Boolean(user?.skinProfile && Object.keys(user.skinProfile).length > 0);
+
+  useEffect(() => {
+    let active = true;
+    if (!hasQuiz || !user?.id || !products.length) {
+      setRecommendations([]);
+      return () => { active = false; };
+    }
+    void recommendProducts(user.id, products)
+      .then(list => { if (active) setRecommendations(list.slice(0, 8).map(item => item.product)); })
+      .catch(() => { if (active) setRecommendations([]); });
+    return () => { active = false; };
+  }, [hasQuiz, user?.id, products]);
 
   // Listen for events from ProductModal's "similar items" click
   useEffect(() => {
@@ -79,53 +97,67 @@ export default function HomePage() {
     return () => window.removeEventListener('open-product-modal', handler as EventListener);
   }, []);
 
-  if (loading) return <div className="min-h-screen bg--background flex items-center justify-center text-sm text-muted-foreground">Loading catalog...</div>;
+  // Deduped carousel feed: trending badges first, then the rest of the catalogue.
+  const trendingProducts: Product[] = (() => {
+    const seen = new Set<string>();
+    const list: Product[] = [];
+    [...trending, ...products].forEach(p => {
+      if (!seen.has(p.id)) { seen.add(p.id); list.push(p); }
+    });
+    return list;
+  })();
+
+  const scrollTrending = (direction: -1 | 1) => {
+    const el = trendingRef.current;
+    if (!el) return;
+    el.scrollBy({ left: direction * Math.max(el.clientWidth * 0.85, 260), behavior: 'smooth' });
+  };
+
+  if (loading) return <LoadingState fullScreen message="Hang tight, loading the catalog…" />;
   if (error) return <div className="min-h-screen bg--background flex items-center justify-center p-6 text-center"><div><h1 className="font-display text-2xl mb-2">Catalog unavailable</h1><p className="text-sm text-muted-foreground">{error}</p></div></div>;
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="storefront-theme min-h-screen bg-background">
       <CustomerNav />
       <ProductModal product={modalProduct} onClose={() => setModalProduct(null)} />
 
       {/* Hero */}
-      <section className="relative overflow-hidden bg-linear-to-br from-[#2C1810] via-[#4A2030] to-[#1B1530]">
-        <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(circle at 30% 50%, #B5697A 0%, transparent 60%), radial-gradient(circle at 80% 30%, #D4A5B5 0%, transparent 50%)' }} />
-        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 py-20 md:py-32 flex flex-col md:flex-row items-center gap-12">
-          <div className="flex-1 text-white">
-            <div className="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 text-xs font-medium text-white/80 mb-6">
+      <section className="bg-[var(--secondary)]">
+        <div className="mx-auto grid max-w-7xl grid-cols-1 items-center gap-8 px-4 py-12 sm:px-6 sm:py-16 md:grid-cols-[1.05fr_0.95fr] md:gap-12 md:py-20">
+          <div>
+            <div className="mb-5 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[var(--primary)]">
               <Sparkles size={12} />
-              AI-Powered Beauty Recommendations
+              Beauty Recommendations
             </div>
-            <h1 className="font-display text-5xl md:text-6xl lg:text-7xl text-white leading-tight mb-6">
-              Your Skin,<br /><em className="text-[#E8A0B0] not-italic">Your Story.</em>
+            <h1 className="mb-5 font-display text-4xl leading-tight text-[var(--foreground)] sm:text-5xl md:text-6xl">
+              Your Skin,<br /><em className="text-[var(--primary)] not-italic">Your Story.</em>
             </h1>
-            <p className="text-white/70 text-lg max-w-md mb-8 leading-relaxed">
+            <p className="mb-8 max-w-md text-base leading-relaxed text-[var(--foreground)]/85 sm:text-lg">
               Discover P&G's science-backed beauty products tailored to your unique skin type, lifestyle, and preferences.
             </p>
             <div className="flex flex-wrap gap-3">
               <Link to="/quiz">
-                <Button size="lg" className="bg-primary hover:bg-[#9E5569]">Take Beauty Quiz <ArrowRight size={16} /></Button>
+                <Button size="lg">Take Beauty Quiz <ArrowRight size={16} /></Button>
               </Link>
               <Link to="/for-you">
-                <Button size="lg" variant="outline" className="border-white/30 text-white hover:bg-white/10">Shop For You</Button>
+                <Button size="lg" variant="outline" className="!border-2 !border-[var(--foreground)] !bg-transparent !text-[var(--foreground)] hover:!bg-[var(--foreground)] hover:!text-white">Shop For You</Button>
               </Link>
             </div>
           </div>
-          <div className="flex-1 relative flex justify-center">
-            <div className="relative w-72 h-72 md:w-96 md:h-96">
-              <div className="absolute inset-0 rounded-full bg-primary/20 blur-3xl" />
+          <div className="relative min-w-0 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--border)] bg-white">
+            <div className="relative w-full">
               <img
-                src="https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=500&h=500&fit=crop&auto=format"
+                src="https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=900&h=700&fit=crop&auto=format"
                 alt="Beauty products"
-                className="relative z-10 w-full h-full object-cover rounded-3xl shadow-2xl"
+                className="aspect-[4/3] w-full object-cover"
               />
-              <div className="absolute -bottom-4 -left-4 z-20 bg-white/95 backdrop-blur-sm rounded-2xl p-3 shadow-xl">
+              <div className="absolute bottom-3 left-3 z-10 rounded-[var(--radius-inner)] border border-[var(--border)] bg-white/95 p-3 shadow-sm">
                 <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-full bg-rose-light flex items-center justify-center">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--secondary)]">
                     <Zap size={14} className="text-primary" />
                   </div>
                   <div>
-                    <div className="text-xs font-bold text-foreground">AI Match</div>
+                    <div className="text-xs font-bold text-foreground">Personal Match</div>
                     <div className="text-[10px] text-muted-foreground">98% for your skin</div>
                   </div>
                 </div>
@@ -139,9 +171,9 @@ export default function HomePage() {
       <div className="border-y border-border bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { icon: <Truck size={16} />, label: 'Free Shipping', sub: 'On orders over $35' },
+            { icon: <Truck size={16} />, label: 'Free Shipping', sub: 'On orders over ₱2,500' },
             { icon: <Shield size={16} />, label: 'Dermatologist Tested', sub: 'All products certified' },
-            { icon: <Sparkles size={16} />, label: 'AI Personalization', sub: 'Tailored to you' },
+            { icon: <Sparkles size={16} />, label: 'Personalized Picks', sub: 'Tailored to you' },
             { icon: <Zap size={16} />, label: 'Fast Delivery', sub: '2–5 business days' },
           ].map(item => (
             <div key={item.label} className="flex items-center gap-3">
@@ -156,97 +188,131 @@ export default function HomePage() {
       </div>
 
       {/* Categories */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 py-14">
-        <div className="flex items-end justify-between mb-8">
-          <div>
-            <div className="text-xs font-medium text-primary tracking-widest uppercase mb-2">Shop By</div>
-            <h2 className="font-display text-3xl">Category</h2>
-          </div>
-          <Link to="/category/all" className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 transition-colors">View all <ArrowRight size={14} /></Link>
+      <section className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-16">
+        <div className="mb-8 flex items-end justify-between gap-4">
+          <h2 className="font-display text-3xl">Category</h2>
+          <Link to="/category/all" className="group inline-flex shrink-0 items-center gap-2 rounded-full border-2 border-[var(--foreground)] px-4 py-2 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--foreground)] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)]">
+            All Products <ArrowRight size={14} className="transition-transform group-hover:translate-x-1" />
+          </Link>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {categories.map(cat => (
-            <Link key={cat.id} to={`/category/${cat.id}`} className="group relative overflow-hidden rounded-xl aspect-3/4 bg-secondary block">
-              <img src={cat.image} alt={cat.name} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-              <div className="absolute inset-0 bg-linear-to-t from-black/70 via-black/20 to-transparent" />
+            <Link key={cat.id} to="/category/all" className="group relative block h-44 overflow-hidden rounded-[var(--radius-xl)] bg-secondary transition-shadow hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:h-52 md:h-56">
+              <img src={safeImage(cat.image, cat.name)} alt={cat.name} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+              <div className="absolute inset-0 bg-linear-to-t from-black/85 via-black/35 to-transparent" />
               <div className="absolute bottom-0 left-0 right-0 p-4">
                 <h3 className="text-white font-semibold text-sm">{cat.name}</h3>
-                <p className="text-white/70 text-xs">{cat.count} products</p>
+                <p className="text-white/90 text-xs">View all products</p>
               </div>
             </Link>
           ))}
         </div>
       </section>
 
+      {/* Recommended for you — quiz gated */}
+      <section className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-16">
+        <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-widest text-[var(--primary)]">
+              <Sparkles size={12} /> Recommended for you
+            </div>
+            <h2 className="font-display text-3xl">Picked For Your Skin</h2>
+          </div>
+          {hasQuiz && (
+            <Link to="/for-you" className="group inline-flex shrink-0 items-center gap-2 self-start rounded-full border-2 border-[var(--foreground)] px-4 py-2 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--foreground)] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:self-auto">
+              View all <ArrowRight size={14} className="transition-transform group-hover:translate-x-1" />
+            </Link>
+          )}
+        </div>
+
+        {hasQuiz ? (
+          recommendations.length ? (
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              {recommendations.slice(0, 4).map(product => (
+                <ProductCard key={product.id} product={product} onExpand={setModalProduct} />
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-[var(--radius-xl)] border border-dashed border-[var(--border)] bg-white p-6 text-sm text-[var(--muted-foreground)]">
+              Building your recommendations… refresh this page in a moment if nothing appears.
+            </div>
+          )
+        ) : (
+          <div className="flex flex-col items-start gap-5 rounded-[var(--radius-xl)] border border-[var(--border)] bg-white p-6 sm:flex-row sm:items-center sm:justify-between sm:p-8">
+            <div>
+              <h3 className="font-display text-2xl mb-2">Unlock your personalized picks</h3>
+              <p className="max-w-lg text-sm leading-relaxed text-[var(--muted-foreground)]">
+                {user
+                  ? 'Answer our 2-minute beauty quiz and this shelf fills with products matched to your skin type, hair, and concerns.'
+                  : 'Sign in and take our 2-minute beauty quiz to unlock a shelf of products matched to your skin type, hair, and concerns.'}
+              </p>
+            </div>
+            <Link to={user ? '/quiz' : '/login'} className="shrink-0">
+              <Button size="lg">
+                {user ? 'Take Beauty Quiz' : 'Sign In to Start'} <ArrowRight size={16} />
+              </Button>
+            </Link>
+          </div>
+        )}
+      </section>
+
       {/* Trending */}
-      <section className="bg-rose-light/40 py-14">
+      <section className="bg-rose-light/40 py-12 sm:py-16">
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex items-end justify-between mb-8">
+          <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <div className="text-xs font-medium text-primary tracking-widest uppercase mb-2">Don't Miss Out</div>
               <h2 className="font-display text-3xl">Trending & Almost Sold Out</h2>
             </div>
+            <Link to="/category/all" className="group inline-flex shrink-0 items-center gap-2 self-start rounded-full border-2 border-[var(--foreground)] px-4 py-2 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--foreground)] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:self-auto">All Products <ArrowRight size={14} className="transition-transform group-hover:translate-x-1" /></Link>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-            {trending.concat(products.slice(0, 2)).map((p, index) => <ProductCard key={`${p.id}-${index}`} product={p} onExpand={setModalProduct} />)}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => scrollTrending(-1)}
+              aria-label="Scroll trending products left"
+              className="absolute -left-3 top-1/2 z-10 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--border)] bg-white text-[var(--foreground)] shadow-md transition-colors hover:bg-[var(--secondary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:flex"
+            >
+              <ChevronLeft size={18} />
+            </button>
+            <div
+              ref={trendingRef}
+              className="flex snap-x snap-mandatory gap-4 overflow-x-auto scroll-smooth pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
+              {trendingProducts.map(product => (
+                <div key={product.id} className="w-[47%] shrink-0 snap-start sm:w-[31%] md:w-[23.5%] lg:w-[calc((100%-3rem)/4)]">
+                  <ProductCard product={product} onExpand={setModalProduct} />
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => scrollTrending(1)}
+              aria-label="Scroll trending products right"
+              className="absolute -right-3 top-1/2 z-10 hidden h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--border)] bg-white text-[var(--foreground)] shadow-md transition-colors hover:bg-[var(--secondary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] sm:flex"
+            >
+              <ChevronRight size={18} />
+            </button>
           </div>
         </div>
       </section>
 
       {/* Quiz CTA */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 py-14">
-        <div className="rounded-xl bg-linear-to-r from-primary to-[#8B4A5B] p-8 md:p-12 flex flex-col md:flex-row items-center justify-between gap-8">
+        <div className="flex flex-col items-start justify-between gap-6 rounded-[var(--radius-xl)] bg-[var(--primary)] p-6 sm:flex-row sm:items-center sm:p-10">
           <div className="text-white">
             <h2 className="font-display text-3xl md:text-4xl mb-3">Find Your Perfect Match</h2>
-            <p className="text-white/80 max-w-md">Take our 2-minute beauty quiz and let our AI engine recommend products perfectly suited to your skin type and concerns.</p>
+            <p className="text-white/80 max-w-md">Take our 2-minute beauty quiz and discover products matched to your skin type and concerns.</p>
           </div>
           <Link to="/quiz" className="shrink-0">
-            <Button size="lg" className="bg-white text-primary hover:bg-rose-light">
+            <Button size="lg" variant="outline" className="!border-2 !border-white !bg-white !text-[var(--primary)] hover:!bg-transparent hover:!text-white">
               Start Quiz <ArrowRight size={16} />
             </Button>
           </Link>
         </div>
       </section>
 
-      {/* Recommended */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 pb-14">
-        <div className="flex items-end justify-between mb-8">
-          <div>
-            <div className="text-xs font-medium text-primary tracking-widest uppercase mb-2">Personalized</div>
-            <h2 className="font-display text-3xl">Recommended For You</h2>
-          </div>
-          <Link to="/for-you" className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 transition-colors">See all <ArrowRight size={14} /></Link>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          {recommended.map(p => <ProductCard key={p.id} product={p} onExpand={setModalProduct} />)}
-        </div>
-      </section>
-
-      {/* Footer */}
-      <footer className="border-t border-border bg-white py-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 grid grid-cols-2 md:grid-cols-4 gap-8 text-sm">
-          {[
-            { title: 'Shop', links: ['Skin Care', 'Hair Care', 'Personal & Body Care'] },
-            { title: 'Account', links: ['Login', 'Register', 'Orders', 'Wishlist'] },
-            { title: 'Help', links: ['Contact Us', 'Shipping Policy', 'Returns', 'FAQ'] },
-            { title: 'Company', links: ['About P&G', 'Sustainability', 'Careers', 'Press'] },
-          ].map(col => (
-            <div key={col.title}>
-              <div className="font-semibold text-foreground mb-3">{col.title}</div>
-              <ul className="flex flex-col gap-2">
-                {col.links.map(l => <li key={l}><a href="#" className="text-muted-foreground hover:text-primary transition-colors">{l}</a></li>)}
-              </ul>
-            </div>
-          ))}
-        </div>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 mt-8 pt-6 border-t border-border flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-full bg-primary flex items-center justify-center"><Sparkles size={10} className="text-white" /></div>
-            <span className="text-sm font-display text-foreground">P&G Beauty</span>
-          </div>
-          <p className="text-xs text-muted-foreground">© 2026 Procter & Gamble. All rights reserved.</p>
-        </div>
-      </footer>
+      <CustomerFooter />
     </div>
   );
 }

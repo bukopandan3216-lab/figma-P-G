@@ -2,25 +2,27 @@ import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Package, Warehouse, Truck, ShoppingCart, Users,
-  BarChart2, Brain, FileText, Shield, Settings, Sparkles, LogOut, Menu, Bell, TrendingUp
+  BarChart2, Brain, FileText, Shield, Settings, Sparkles, LogOut, Menu, Bell, TrendingUp, Activity
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasModulePermission, type AdminModule } from '../lib/permissions';
 
-interface NavItem { label: string; icon: React.ReactNode; href: string; }
+interface NavItem { label: string; icon: React.ReactNode; href: string; module: AdminModule; }
 
 const navItems: NavItem[] = [
-  { label: 'Dashboard', icon: <LayoutDashboard size={17} />, href: '/admin/dashboard' },
-  { label: 'Products', icon: <Package size={17} />, href: '/admin/products' },
-  { label: 'Inventory', icon: <Warehouse size={17} />, href: '/admin/inventory' },
-  { label: 'Suppliers', icon: <Truck size={17} />, href: '/admin/suppliers' },
-  { label: 'Purchases', icon: <ShoppingCart size={17} />, href: '/admin/purchases' },
-  { label: 'Customers', icon: <Users size={17} />, href: '/admin/customers' },
-  { label: 'Sales', icon: <TrendingUp size={17} />, href: '/admin/sales' },
-  { label: 'Customer Insights', icon: <BarChart2 size={17} />, href: '/admin/insights' },
-  { label: 'Recommendations', icon: <Brain size={17} />, href: '/admin/recommendations' },
-  { label: 'Reports', icon: <FileText size={17} />, href: '/admin/reports' },
-  { label: 'Users & Access', icon: <Shield size={17} />, href: '/admin/users' },
-  { label: 'Settings', icon: <Settings size={17} />, href: '/admin/settings' },
+  { label: 'Dashboard', icon: <LayoutDashboard size={17} />, href: '/admin/dashboard', module: 'dashboard' },
+  { label: 'Products', icon: <Package size={17} />, href: '/admin/products', module: 'products' },
+  { label: 'Inventory', icon: <Warehouse size={17} />, href: '/admin/inventory', module: 'inventory' },
+  { label: 'Suppliers', icon: <Truck size={17} />, href: '/admin/suppliers', module: 'suppliers' },
+  { label: 'Purchases', icon: <ShoppingCart size={17} />, href: '/admin/purchases', module: 'purchases' },
+  { label: 'Customers', icon: <Users size={17} />, href: '/admin/customers', module: 'customers' },
+  { label: 'Sales', icon: <TrendingUp size={17} />, href: '/admin/sales', module: 'sales' },
+  { label: 'Customer Insights', icon: <BarChart2 size={17} />, href: '/admin/insights', module: 'insights' },
+  { label: 'Recommendations', icon: <Brain size={17} />, href: '/admin/recommendations', module: 'recommendations' },
+  { label: 'Reports', icon: <FileText size={17} />, href: '/admin/reports', module: 'reports' },
+  { label: 'Users and Roles', icon: <Shield size={17} />, href: '/admin/users', module: 'users' },
+  { label: 'Activity Log', icon: <Activity size={17} />, href: '/admin/activity', module: 'activity' },
+  { label: 'Settings', icon: <Settings size={17} />, href: '/admin/settings', module: 'settings' },
 ];
 
 export default function AdminSidebar({ children }: { children: React.ReactNode }) {
@@ -36,15 +38,16 @@ export default function AdminSidebar({ children }: { children: React.ReactNode }
   const handleLogout = () => { logout(); navigate('/admin/login'); };
 
   const roleLabel: Record<string, string> = {
-    super_admin: 'Super Admin',
-    beauty_admin: 'Beauty Admin',
+    super_admin: 'P&G Super Administrator',
+    beauty_admin: 'Beauty Administrator',
     beauty_staff: 'Beauty Staff',
   };
+  const visibleNavItems = navItems.filter(item => hasModulePermission(user, item.module));
 
   const notifs = [
     { text: 'Low stock: Classic Cleanser (8 units)', time: '15 min ago', dot: 'bg-amber-400' },
     { text: 'New order #PGB-2026-08842', time: '2 min ago', dot: 'bg-blue-400' },
-    { text: 'AI model retrained — 94.2% accuracy', time: '3 hr ago', dot: 'bg-[var(--primary)]' },
+    { text: 'Recommendation refresh complete — 94.2% match rate', time: '3 hr ago', dot: 'bg-[var(--primary)]' },
   ];
 
   const SidebarContent = () => (
@@ -56,13 +59,13 @@ export default function AdminSidebar({ children }: { children: React.ReactNode }
         {!collapsed && (
           <div>
             <div className="text-white font-semibold text-sm leading-none">P&G Beauty</div>
-            <div className="text-white/50 text-[10px] mt-0.5 font-mono">MIS Admin</div>
+            <div className="text-white/75 text-[10px] mt-0.5 font-mono">MIS Admin</div>
           </div>
         )}
       </div>
 
       <nav className="flex-1 overflow-y-auto py-3 px-2 scrollbar-hide">
-        {navItems.map(item => (
+        {visibleNavItems.map(item => (
           <Link
             key={item.label}
             to={item.href}
@@ -70,7 +73,7 @@ export default function AdminSidebar({ children }: { children: React.ReactNode }
             className={`flex items-center gap-3 px-3 py-2.5 rounded-[var(--radius)] text-sm font-medium transition-all mb-0.5 ${
               isActive(item.href)
                 ? 'bg-[var(--primary)] text-white'
-                : 'text-white/60 hover:text-white hover:bg-white/8'
+                : 'text-white/80 hover:text-white hover:bg-white/10'
             }`}
           >
             <span className="flex-shrink-0">{item.icon}</span>
@@ -87,11 +90,11 @@ export default function AdminSidebar({ children }: { children: React.ReactNode }
           {!collapsed && (
             <div className="flex-1 min-w-0">
               <div className="text-white text-xs font-medium truncate">{roleLabel[user?.role || ''] || 'Admin'}</div>
-              <div className="text-white/40 text-[10px] truncate">{user?.email}</div>
+              <div className="text-white/70 text-[10px] truncate">{user?.email}</div>
             </div>
           )}
           {!collapsed && (
-            <button onClick={handleLogout} title="Sign out" className="text-white/40 hover:text-white transition-colors p-1 rounded hover:bg-white/10">
+            <button onClick={handleLogout} title="Sign out" className="text-white/70 hover:text-white transition-colors p-1 rounded hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
               <LogOut size={14} />
             </button>
           )}

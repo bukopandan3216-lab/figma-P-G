@@ -4,21 +4,87 @@ import { useParams, Link } from 'react-router-dom';
 import { ShoppingBag, Heart, ChevronLeft, ChevronRight, Star, Check, Truck, Shield, RotateCcw } from 'lucide-react';
 import { useCatalog } from '../../context/CatalogContext';
 import { useCart } from '../../context/AppContext';
-import { Badge, Button, StarRating, Tabs, Breadcrumb } from '../../components/ui';
+import { useAuth } from '../../context/AuthContext';
+import { Badge, Button, StarRating, Tabs, Breadcrumb, LoadingState } from '../../components/ui';
 import CustomerNav from '../../components/CustomerNav';
 import { safeImage } from '../../lib/image';
+import { supabase } from '../../lib/supabase';
+import { recordCustomerInteraction } from '../../lib/recommendations';
+import { FREE_SHIPPING_THRESHOLD } from '../../lib/catalog';
+
+type DbReview = {
+  id: string;
+  rating: number;
+  review: string;
+  createdAt: string;
+  reviewer: string;
+};
 
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { products, loading, error } = useCatalog();
   const product = products.find(p => p.id === id);
+  const { user } = useAuth();
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior }); }, [id]);
+  useEffect(() => {
+    if (!product || !user?.id) return;
+    void recordCustomerInteraction(user.id, product.id, 'view').catch(cause => console.error('Unable to record product view:', cause));
+  }, [product?.id, user?.id]);
   const [activeImg, setActiveImg] = useState(0);
   const [selectedVariants, setSelectedVariants] = useState<Record<string, string>>({});
   const [tab, setTab] = useState('Description');
   const [qty, setQty] = useState(1);
+  const [productReviews, setProductReviews] = useState<DbReview[]>([]);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
   const { addToCart, wishlist, toggleWishlist } = useCart();
-  if (loading) return <div className="min-h-screen bg-background flex items-center justify-center text-sm text-muted-foreground">Loading product...</div>;
+
+  // Reviews are read straight from product_reviews — products.rating/products.reviews
+  // are kept in sync by the refresh_product_rating() trigger in the database.
+  useEffect(() => {
+    let active = true;
+    setProductReviews([]);
+    if (!id) {
+      setReviewsLoading(false);
+      return () => { active = false; };
+    }
+    setReviewsLoading(true);
+    (async () => {
+      try {
+        // Reviewer names come from the public review_authors view (name only).
+        // Embedding profiles() is blocked for guests and filtered out for other
+        // customers, and it would expose reviewer emails.
+        const [{ data, error }, authors] = await Promise.all([
+          supabase
+            .from('product_reviews')
+            .select('review_id, user_id, rating, review, created_at')
+            .eq('product_id', id)
+            .order('created_at', { ascending: false })
+            .limit(20),
+          supabase.from('review_authors').select('user_id, first_name, last_name'),
+        ]);
+        if (!active) return;
+        if (error) throw error;
+        const names = new Map<string, string>(
+          ((authors.data || []) as { user_id: string; first_name: string | null; last_name: string | null }[])
+            .map(author => [author.user_id, [author.first_name, author.last_name].filter(Boolean).join(' ')]),
+        );
+        setProductReviews((data || []).map((row: any) => ({
+          id: row.review_id,
+          rating: Number(row.rating || 0),
+          review: String(row.review || ''),
+          createdAt: row.created_at || '',
+          reviewer: names.get(row.user_id) || 'Beauty customer',
+        })));
+      } catch {
+        if (active) setProductReviews([]);
+      } finally {
+        if (active) setReviewsLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [id]);
+
+  if (loading) return <LoadingState fullScreen message="Hang tight, loading product details…" />;
   if (error || !product) return <div className="min-h-screen bg-background flex items-center justify-center p-6 text-center"><p className="text-sm text-[var(--muted-foreground)]">{error || 'Product not found.'}</p></div>;
   const wished = wishlist.includes(product.id);
   // products.images defaults to '{}' (an empty array) in the DB, not null —
@@ -68,11 +134,11 @@ export default function ProductDetailPage() {
             </div>
 
             <div className="flex items-center gap-3 mb-6">
-              <span className="text-3xl font-bold">${product.price.toFixed(2)}</span>
+              <span className="text-3xl font-bold">₱{product.price.toFixed(2)}</span>
               {product.originalPrice && (
                 <>
-                  <span className="text-lg text-[var(--muted-foreground)] line-through">${product.originalPrice.toFixed(2)}</span>
-                  <Badge variant="danger">Save ${(product.originalPrice - product.price).toFixed(2)}</Badge>
+                  <span className="text-lg text-[var(--muted-foreground)] line-through">₱{product.originalPrice.toFixed(2)}</span>
+                  <Badge variant="danger">Save ₱{(product.originalPrice - product.price).toFixed(2)}</Badge>
                 </>
               )}
             </div>
@@ -132,8 +198,7 @@ export default function ProductDetailPage() {
             {/* Benefits */}
             <div className="flex flex-col gap-2 mt-4 p-4 bg-[var(--secondary)] rounded-[var(--radius-lg)]">
               {[
-                { icon: <Truck size={14} />, text: 'Free shipping on orders over $35' },
-                { icon: <Shield size={14} />, text: 'Dermatologist tested & approved' },
+                { icon: <Truck size={14} />, text: `Free shipping on orders over ₱${FREE_SHIPPING_THRESHOLD.toLocaleString('en-PH')}` },
                 { icon: <RotateCcw size={14} />, text: '30-day hassle-free returns' },
               ].map(item => (
                 <div key={item.text} className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
@@ -171,30 +236,54 @@ export default function ProductDetailPage() {
             )}
             {tab === 'Reviews' && (
               <div className="flex flex-col gap-6 max-w-2xl">
-                <div className="flex items-center gap-4 p-4 bg-[var(--secondary)] rounded-[var(--radius-lg)]">
-                  <div className="text-center">
+                <div className="flex flex-col gap-5 p-4 bg-[var(--secondary)] rounded-[var(--radius-lg)] sm:flex-row sm:items-center">
+                  <div className="text-center shrink-0">
                     <div className="text-4xl font-bold font-display">{product.rating}</div>
                     <StarRating rating={product.rating} />
                     <div className="text-xs text-[var(--muted-foreground)] mt-1">{product.reviews.toLocaleString()} reviews</div>
                   </div>
-                </div>
-                {[
-                  { name: 'Sarah M.', rating: 5, date: 'Sep 12, 2026', text: 'This moisturizer has completely transformed my skin. I\'ve noticed a visible difference in just 2 weeks!' },
-                  { name: 'Jennifer K.', rating: 4, date: 'Aug 28, 2026', text: 'Great product, lightweight and absorbs quickly. The price point is excellent for the quality.' },
-                  { name: 'Maria L.', rating: 5, date: 'Aug 14, 2026', text: 'My dermatologist recommended this and I couldn\'t be happier. Perfect for my combination skin.' },
-                ].map((review, i) => (
-                  <div key={i} className="flex flex-col gap-2 border-b border-[var(--border)] pb-5 last:border-0">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="w-8 h-8 rounded-full bg-[var(--primary)]/20 text-[var(--primary)] text-xs font-bold flex items-center justify-center">{review.name[0]}</div>
-                        <span className="text-sm font-medium">{review.name}</span>
-                      </div>
-                      <span className="text-xs text-[var(--muted-foreground)]">{review.date}</span>
+                  {productReviews.length > 0 && (
+                    <div className="flex flex-1 flex-col gap-1.5">
+                      {[5, 4, 3, 2, 1].map(star => {
+                        const count = productReviews.filter(review => review.rating === star).length;
+                        const percent = Math.round((count / productReviews.length) * 100);
+                        return (
+                          <div key={star} className="flex items-center gap-2 text-xs">
+                            <span className="w-6 text-[var(--muted-foreground)]">{star}★</span>
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white">
+                              <div className="h-full rounded-full bg-[var(--primary)]" style={{ width: `${percent}%` }} />
+                            </div>
+                            <span className="w-5 text-right text-[var(--muted-foreground)]">{count}</span>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <StarRating rating={review.rating} />
-                    <p className="text-sm text-[var(--muted-foreground)]">{review.text}</p>
+                  )}
+                </div>
+
+                {reviewsLoading ? (
+                  <p className="text-sm text-[var(--muted-foreground)]">Loading reviews…</p>
+                ) : productReviews.length ? (
+                  productReviews.map(review => (
+                    <div key={review.id} className="flex flex-col gap-2 border-b border-[var(--border)] pb-5 last:border-0">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-full bg-[var(--primary)]/20 text-[var(--primary)] text-xs font-bold flex items-center justify-center">{review.reviewer[0]?.toUpperCase() || 'B'}</div>
+                          <span className="text-sm font-medium">{review.reviewer}</span>
+                        </div>
+                        <span className="text-xs text-[var(--muted-foreground)]">
+                          {review.createdAt ? new Date(review.createdAt).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
+                        </span>
+                      </div>
+                      <StarRating rating={review.rating} />
+                      <p className="text-sm text-[var(--muted-foreground)]">{review.review}</p>
+                    </div>
+                  ))
+                ) : (
+                  <div className="border border-dashed border-[var(--border)] rounded-[var(--radius-lg)] p-6 text-sm text-[var(--muted-foreground)]">
+                    No reviews yet for this product. Be the first to share your experience.
                   </div>
-                ))}
+                )}
               </div>
             )}
           </div>
@@ -208,12 +297,12 @@ export default function ProductDetailPage() {
               {relatedProducts.map(p => (
                 <Link key={p.id} to={`/product/${p.id}`} className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-md transition-all">
                   <div className="aspect-square bg-[var(--secondary)] overflow-hidden">
-                    <img src={p.image} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                    <img src={safeImage(p.image, p.name)} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                   </div>
                   <div className="p-3">
                     <div className="text-[10px] text-[var(--muted-foreground)] mb-0.5">{p.brand}</div>
                     <div className="text-sm font-semibold line-clamp-2 leading-snug">{p.name}</div>
-                    <div className="text-sm font-bold mt-1">${p.price.toFixed(2)}</div>
+                    <div className="text-sm font-bold mt-1">₱{p.price.toFixed(2)}</div>
                   </div>
                 </Link>
               ))}
@@ -226,7 +315,7 @@ export default function ProductDetailPage() {
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-[var(--border)] p-4 flex items-center gap-3 md:hidden z-30">
         <div className="flex-1 min-w-0">
           <div className="text-xs text-[var(--muted-foreground)] truncate">{product.name}</div>
-          <div className="font-bold">${product.price.toFixed(2)}</div>
+          <div className="font-bold">₱{product.price.toFixed(2)}</div>
         </div>
         <Button disabled={!product.inStock || product.stock <= 0} onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })}>
           <ShoppingBag size={15} /> Add to Cart

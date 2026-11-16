@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, Users, Package, AlertTriangle, Brain, ArrowUpRight } from 'lucide-react';
-import { Card, Badge } from '../../components/ui';
+import { Card, Badge, useToast, ToastContainer } from '../../components/ui';
+import { useAuth } from '../../context/AuthContext';
 import AdminSidebar from '../../components/AdminSidebar';
 import { fetchDashboardData } from '../../lib/adminData';
+import { expireEndedDiscounts } from '../../lib/catalog';
 
 const colorMap: Record<string, string> = {
   emerald: 'bg-emerald-50 text-emerald-600',
@@ -15,13 +17,27 @@ const colorMap: Record<string, string> = {
 const categoryColors = ['#B5697A', '#5B8C85', '#D4944C', '#6F82A8', '#8B6B9E', '#7A8F52'];
 
 export default function AdminDashboard() {
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role === 'super_admin';
   const [dashboard, setDashboard] = useState<any>({ salesData: [], topProducts: [], categoryData: [], totalSales: 0, customerCount: 0, activeCustomerCount: 0, productCount: 0, supplierCount: 0, inventoryUnits: 0, lowStock: 0 });
   const [error, setError] = useState<string | null>(null);
+  const { toasts, add: addToast, remove } = useToast();
+  // useToast() returns a fresh `add` each render; keep it in a ref so the
+  // polling effect below does not restart (and re-poll) on every render.
+  const addToastRef = useRef(addToast);
+  addToastRef.current = addToast;
   useEffect(() => {
     const refresh = () => {
       void fetchDashboardData()
         .then(data => { setDashboard(data); setError(null); })
         .catch(cause => setError(cause instanceof Error ? cause.message : 'Unable to load dashboard data.'));
+      // Sale windows that just ended: revert price in the DB and tell the admin.
+      void expireEndedDiscounts().then(names => {
+        if (!names.length) return;
+        addToastRef.current('info', names.length === 1
+          ? `Sale ended for ${names[0]} — the price has been restored.`
+          : `Sales ended for ${names.length} products (e.g. ${names[0]}) — prices restored.`);
+      }).catch(() => undefined);
     };
     refresh();
     const interval = window.setInterval(refresh, 30_000);
@@ -41,7 +57,7 @@ export default function AdminDashboard() {
     topProduct
       ? `${topProduct.name} is currently the leading product by revenue at ₱${topProduct.sales.toLocaleString()}.`
       : 'Product performance will appear after sales are recorded.',
-    `${dashboard.activeCustomerCount} customer${dashboard.activeCustomerCount === 1 ? '' : 's'} currently active in the last two minutes, out of ${dashboard.customerCount} registered customers.`,
+    `${dashboard.customerCount} registered customer${dashboard.customerCount === 1 ? '' : 's'} in the Beauty Subsystem.`,
     `${dashboard.productCount} active products, ${dashboard.supplierCount} suppliers, and ${dashboard.inventoryUnits.toLocaleString()} units currently tracked in inventory.`,
     dashboard.lowStock > 0
       ? `${dashboard.lowStock} inventory item${dashboard.lowStock === 1 ? '' : 's'} need${dashboard.lowStock === 1 ? 's' : ''} replenishment attention.`
@@ -56,10 +72,16 @@ export default function AdminDashboard() {
   ];
   return (
     <AdminSidebar>
+      <ToastContainer toasts={toasts} onRemove={remove} />
       <div className="flex flex-col gap-6 animate-fade-in">
-        <div>
-          <h1 className="text-xl font-bold text-[var(--foreground)]">Dashboard</h1>
-          <p className="text-sm text-[var(--muted-foreground)] mt-0.5">Welcome back, Super Admin · Sept 21, 2026</p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold text-[var(--foreground)]">Dashboard</h1>
+            <p className="text-sm text-[var(--muted-foreground)] mt-0.5">
+              {isSuperAdmin ? 'Super Administrator · P&G Beauty'
+                : user?.role === 'beauty_admin' ? 'Beauty Administrator' : 'Beauty Staff'}
+            </p>
+          </div>
         </div>
         {error && <div className="rounded-[var(--radius)] border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">Dashboard data error: {error}</div>}
 
@@ -145,11 +167,11 @@ export default function AdminDashboard() {
             </ResponsiveContainer>
           </Card>
 
-          {/* AI summary */}
+          {/* Recommendation summary */}
           <Card className="p-5">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <h2 className="font-semibold text-sm">AI Summary</h2>
+                <h2 className="font-semibold text-sm">Recommendation Summary</h2>
                 <p className="text-xs text-[var(--muted-foreground)] mt-0.5">Live readout from dashboard data</p>
               </div>
               <div className="w-8 h-8 rounded-full bg-[var(--rose-light)] flex items-center justify-center text-[var(--primary)]"><Brain size={15} /></div>

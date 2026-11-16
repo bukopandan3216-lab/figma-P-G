@@ -9,8 +9,11 @@ export interface User {
   email: string;
   phone?: string;
   birthday?: string;
-  role: 'customer' | 'super_admin' | 'beauty_admin' | 'beauty_staff';
+  role: 'customer' | 'beauty_staff' | 'beauty_admin' | 'super_admin';
+  accountStatus: 'Active' | 'Inactive';
   initials: string;
+  /** Beauty quiz answers saved to profiles.skin_profile; null until the quiz is taken. */
+  skinProfile?: Record<string, unknown> | null;
 }
 
 interface AuthCtx {
@@ -20,6 +23,7 @@ interface AuthCtx {
   register: (data: RegisterData) => Promise<{ ok: boolean; error?: string }>;
   socialLogin: (provider: 'Google' | 'Facebook') => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
   updateUser: (data: Partial<User>) => Promise<void>;
   isAdmin: boolean;
   isCustomer: boolean;
@@ -36,20 +40,21 @@ const Ctx = createContext<AuthCtx | null>(null);
 const USER_STORAGE_KEY = 'pgbeauty-user';
 
 type ProfileRow = {
-  id: string;
-  full_name: string;
+  user_id: string;
+  first_name: string;
+  last_name: string;
   email?: string | null;
   phone?: string | null;
   birthday?: string | null;
-  role: 'Customer' | 'Beauty Staff' | 'Beauty Admin' | 'Super Admin';
+  role: User['role'];
+  account_status?: 'Active' | 'Inactive' | null;
   skin_profile?: Record<string, unknown>;
 };
 
 function toUser(authUser: SupabaseUser, profile?: ProfileRow | null): User {
-  const names = (profile?.full_name || authUser.user_metadata?.full_name || '').trim().split(/\s+/).filter(Boolean);
-  const firstName = names[0] || authUser.email?.split('@')[0] || 'User';
-  const lastName = names.slice(1).join(' ');
-  const roleMap: Record<ProfileRow['role'], User['role']> = { Customer: 'customer', 'Beauty Staff': 'beauty_staff', 'Beauty Admin': 'beauty_admin', 'Super Admin': 'super_admin' };
+  const legacyNames = (authUser.user_metadata?.full_name || '').trim().split(/\s+/).filter(Boolean);
+  const firstName = profile?.first_name || authUser.user_metadata?.first_name || legacyNames[0] || authUser.email?.split('@')[0] || 'User';
+  const lastName = profile?.last_name || authUser.user_metadata?.last_name || legacyNames.slice(1).join(' ');
   return {
     id: authUser.id,
     firstName,
@@ -57,8 +62,10 @@ function toUser(authUser: SupabaseUser, profile?: ProfileRow | null): User {
     email: profile?.email || authUser.email || '',
     phone: profile?.phone || undefined,
     birthday: profile?.birthday || undefined,
-    role: profile ? roleMap[profile.role] : 'customer',
+    role: profile?.role || 'customer',
+    accountStatus: profile?.account_status === 'Inactive' ? 'Inactive' : 'Active',
     initials: `${firstName[0] || 'U'}${lastName[0] || ''}`.toUpperCase(),
+    skinProfile: profile?.skin_profile ?? null,
   };
 }
 
@@ -87,15 +94,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => readStoredUser());
   const [loading, setLoading] = useState(true);
 
-  const loadProfile = async (authUser: SupabaseUser | null) => {
+  const loadProfile = async (authUser: SupabaseUser | null): Promise<User | null> => {
     if (!authUser) {
       setUser(null);
       persistUser(null);
-      return;
+      return null;
     }
 
     const storedUser = readStoredUser();
-    const { data, error } = await supabase.from('profiles').select('*').eq('id', authUser.id).maybeSingle();
+    const { data, error } = await supabase.from('profiles').select('*').eq('user_id', authUser.id).maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error('Your account profile could not be loaded.');
     const dbUser = toUser(authUser, data);
     const nextUser = storedUser && storedUser.id === authUser.id
       ? {
@@ -105,15 +114,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           firstName: dbUser.firstName || storedUser.firstName,
           lastName: dbUser.lastName || storedUser.lastName,
           phone: dbUser.phone || storedUser.phone,
-          birthday: dbUser.birthday || storedUser.birthday,
-          role: dbUser.role || storedUser.role,
+          birthday: data ? dbUser.birthday : storedUser.birthday,
           initials: dbUser.initials || storedUser.initials,
         }
       : dbUser;
 
     setUser(nextUser);
     persistUser(nextUser);
-    if (error) return;
+    return nextUser;
   };
 
   useEffect(() => {
@@ -122,11 +130,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
     let active = true;
-    void supabase.auth.getSession().then(({ data }) => {
-      if (active) void loadProfile(data.session?.user || null).finally(() => setLoading(false));
+    void supabase.auth.getSession().then(async ({ data }) => {
+      if (!active) return;
+      try {
+        await loadProfile(data.session?.user || null);
+      } catch (error) {
+        console.error('Unable to load account profile:', error);
+        setUser(null);
+        persistUser(null);
+        if (data.session) await supabase.auth.signOut();
+      } finally {
+        if (active) setLoading(false);
+      }
+    }).catch(error => {
+      console.error('Unable to restore the authentication session:', error);
+      if (active) setLoading(false);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (active) void loadProfile(session?.user || null);
+      if (active) {
+        void loadProfile(session?.user || null).catch(error => {
+          console.error('Unable to load account profile:', error);
+          setUser(null);
+          persistUser(null);
+          if (session) void supabase.auth.signOut();
+        });
+      }
     });
     return () => {
       active = false;
@@ -135,10 +163,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!user || user.role !== 'customer') return;
+    if (!user) return;
     const markActive = () => {
-      void supabase.rpc('touch_customer_activity')
-        .then(({ error }) => { if (error) console.error('Unable to update customer activity:', error.message); });
+      void supabase.rpc('touch_user_activity')
+        .then(({ error }) => { if (error) console.error('Unable to update account activity:', error.message); });
     };
     const handleVisibility = () => { if (document.visibilityState === 'visible') markActive(); };
     markActive();
@@ -150,7 +178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', markActive);
     };
-  }, [user?.id, user?.role]);
+  }, [user?.id]);
 
   const unavailable = () => ({ ok: false, error: 'Supabase is not configured. Add the VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY environment variables.' });
 
@@ -159,14 +187,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const normalizedEmail = email.trim().toLowerCase();
     const { data, error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
     if (error || !data.user) return { ok: false, error: error?.message || 'Login failed.' };
-    await loadProfile(data.user);
-    const nextRole = (await supabase.from('profiles').select('role').eq('id', data.user.id).maybeSingle()).data?.role;
+    let signedInUser: User | null;
+    try {
+      signedInUser = await loadProfile(data.user);
+    } catch (cause) {
+      await supabase.auth.signOut();
+      return { ok: false, error: cause instanceof Error ? cause.message : 'Unable to load your account.' };
+    }
+    if (!signedInUser || signedInUser.accountStatus !== 'Active') {
+      await supabase.auth.signOut();
+      setUser(null);
+      persistUser(null);
+      return { ok: false, error: 'This account is inactive. Contact an administrator for assistance.' };
+    }
+
     if (role && role !== 'customer') {
-      if (!['Super Admin', 'Beauty Admin', 'Beauty Staff'].includes(nextRole)) {
+      if (signedInUser.role === 'customer') {
         await supabase.auth.signOut();
         return { ok: false, error: 'This account does not have admin access.' };
       }
-    } else if (nextRole && nextRole !== 'Customer') {
+    } else if (signedInUser.role !== 'customer') {
       await supabase.auth.signOut();
       setUser(null);
       return { ok: false, error: 'Use the admin portal to sign in with this account.' };
@@ -179,10 +219,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data: result, error } = await supabase.auth.signUp({
       email: data.email,
       password: data.password,
-      options: { data: { full_name: `${data.firstName} ${data.lastName}`.trim() } },
+      options: { data: { first_name: data.firstName, last_name: data.lastName } },
     });
     if (error) return { ok: false, error: error.message };
-    if (result.user) await loadProfile(result.session?.user || null);
+    if (result.session?.user) await loadProfile(result.session.user);
     return { ok: true };
   };
 
@@ -201,29 +241,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     persistUser(null);
   };
 
+  const refreshUser = async () => {
+    const { data, error } = await supabase.auth.getUser();
+    if (error) throw error;
+    if (!data.user) throw new Error('Your session has expired. Sign in again.');
+    const refreshedUser = await loadProfile(data.user);
+    if (!refreshedUser) throw new Error('Your account profile could not be loaded.');
+  };
+
   const updateUser = async (data: Partial<User>) => {
     if (!user) return;
 
     const nextFirstName = (data.firstName || user.firstName || '').trim();
     const nextLastName = (data.lastName || user.lastName || '').trim();
     const nextPhone = data.phone?.trim() ? data.phone.trim() : user.phone || undefined;
-    const nextBirthday = data.birthday && data.birthday !== '' ? data.birthday : user.birthday || undefined;
-
-    const profileData = {
-      id: user.id,
-      full_name: `${nextFirstName} ${nextLastName}`.trim(),
-      email: user.email,
-      phone: nextPhone || null,
-      birthday: nextBirthday || null,
-    };
+    const nextBirthday = data.birthday !== undefined ? data.birthday || undefined : user.birthday;
 
     const { data: updated, error } = await supabase
       .from('profiles')
-      .upsert(profileData, { onConflict: 'id' })
+      .update({
+        first_name: nextFirstName,
+        last_name: nextLastName,
+        phone: nextPhone || null,
+        birthday: nextBirthday || null,
+      })
+      .eq('user_id', user.id)
       .select('*')
       .maybeSingle();
 
     if (error) throw error;
+    if (!updated) throw new Error('Your profile could not be found.');
 
     const mergedUser = {
       ...user,
@@ -239,10 +286,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     persistUser(nextUser);
   };
 
-  const isAdmin = !!user && ['super_admin', 'beauty_admin', 'beauty_staff'].includes(user.role);
+  const isAdmin = !!user && user.role !== 'customer';
   const isCustomer = !!user && user.role === 'customer';
 
-  return <Ctx.Provider value={{ user, loading, login, register, socialLogin, logout, updateUser, isAdmin, isCustomer }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ user, loading, login, register, socialLogin, logout, refreshUser, updateUser, isAdmin, isCustomer }}>{children}</Ctx.Provider>;
 }
 
 export function useAuth() {

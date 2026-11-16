@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { useAuth } from './AuthContext';
 import { supabase } from '../lib/supabase';
+import { recordCustomerInteraction } from '../lib/recommendations';
 
 export interface CartItem {
   id: string;
@@ -78,7 +79,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       let cancelled = false;
 
       void Promise.all([
-        supabase.from('cart_items').select('product_id, quantity, variant_id, products(id, name, price, image, brands(name))').eq('user_id', user.id),
+        supabase.from('cart_items').select('product_id, quantity, variant_id, products(id:product_id, name, price, image, brands(name))').eq('user_id', user.id),
         supabase.from('wishlist_items').select('product_id').eq('user_id', user.id),
       ]).then(([cartResult, wishlistResult]) => {
         if (cancelled) return;
@@ -146,6 +147,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       quantity: nextQuantity,
       variant_id: item.variant || existing?.variant || null,
     }, { onConflict: 'user_id,product_id' });
+    if (user) void recordCustomerInteraction(user.id, item.id, 'cart').catch(error => console.error('Unable to record cart interaction:', error));
   };
   const removeFromCart = (id: string) => {
     const nextCart = cart.filter(i => i.id !== id);
@@ -173,7 +175,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     if (user) {
       if (exists) void supabase.from('wishlist_items').delete().eq('user_id', user.id).eq('product_id', id);
-      else void supabase.from('wishlist_items').insert({ user_id: user.id, product_id: id });
+      else {
+        void supabase.from('wishlist_items').insert({ user_id: user.id, product_id: id });
+        void recordCustomerInteraction(user.id, id, 'wishlist').catch(error => console.error('Unable to record wishlist interaction:', error));
+      }
     }
   };
 

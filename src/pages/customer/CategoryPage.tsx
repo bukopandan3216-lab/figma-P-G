@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import { Link, useParams } from "react-router-dom"
-import { Filter, ChevronDown, X } from "lucide-react"
+import { Filter, ChevronDown, X, Heart } from "lucide-react"
 import type { Product } from "../../data/products"
 import { useCatalog } from "../../context/CatalogContext"
 import { useCart } from "../../context/AppContext"
@@ -11,6 +11,7 @@ import {
   Checkbox,
   RangeSlider,
   Breadcrumb,
+  LoadingState,
 } from "../../components/ui"
 import CustomerNav from "../../components/CustomerNav"
 import ProductModal from "../../components/ProductModal"
@@ -33,10 +34,10 @@ export default function CategoryPage() {
   const [sort, setSort] = useState("Featured")
   const [filterOpen, setFilterOpen] = useState(false)
   const [modalProduct, setModalProduct] = useState<Product | null>(null)
+  const [page, setPage] = useState(1)
+  const PAGE_SIZE = 16
   const { addToCart, wishlist, toggleWishlist } = useCart()
   const { products, loading, error } = useCatalog()
-  const maxPrice = Math.ceil(Math.max(...products.map((product) => product.price), 0))
-  const brands = [...new Set(products.map(product => product.brand).filter(Boolean))].sort()
 
   useEffect(() => {
     const handler = (e: CustomEvent) => setModalProduct(e.detail)
@@ -45,11 +46,35 @@ export default function CategoryPage() {
       window.removeEventListener("open-product-modal", handler as EventListener)
   }, [])
 
+  const matchesCategory = (p: Product) => {
+    if (p.category === "Oral Care") return false
+    if (id === "all" || id === undefined) return true
+    if (id === "personal-body-care" || id === "body-care" || id === "personal-care")
+      return p.category === "Personal Care" || p.category === "Body Care"
+    if (p.category.toLowerCase().replace(" ", "-") === id) return true
+    return p.category
+      .toLowerCase()
+      .replace(/\s+/g, "-")
+      .includes((id || "").replace("-care", ""))
+  }
+
+  // Brands and the price range are scoped to this category so the slider always
+  // reflects the most expensive product actually shown here.
+  const categoryProducts = products.filter(matchesCategory)
+  const maxPrice = categoryProducts.length
+    ? Math.ceil(Math.max(...categoryProducts.map((product) => product.price)))
+    : 0
+  const brands = [...new Set(categoryProducts.map(product => product.brand).filter(Boolean))].sort()
+
   useEffect(() => {
     if (maxPrice > 0) setPriceRange([0, maxPrice])
   }, [maxPrice])
 
-  if (loading) return <div className="min-h-screen bg-[var(--background)] flex items-center justify-center text-sm text-[var(--muted-foreground)]">Loading catalog...</div>
+  useEffect(() => {
+    setPage(1)
+  }, [id, sort, selectedBrands, priceRange, inStockOnly, onSaleOnly])
+
+  if (loading) return <LoadingState fullScreen message="Hang tight, loading products…" />
   if (error) return <div className="min-h-screen bg-[var(--background)] flex items-center justify-center p-6 text-center"><p className="text-sm text-[var(--muted-foreground)]">{error}</p></div>
 
   const categoryName =
@@ -61,22 +86,12 @@ export default function CategoryPage() {
           ? "Personal & Body Care"
           : "All Products"
 
-  let filtered = products.filter((p) => {
-    if (p.category === "Oral Care") return false
-    const matchesCat =
-      id === "all" ||
-      id === undefined ||
-      ((id === "personal-body-care" || id === "body-care" || id === "personal-care") && (p.category === "Personal Care" || p.category === "Body Care")) ||
-      p.category.toLowerCase().replace(" ", "-") === id ||
-      p.category
-        .toLowerCase()
-        .replace(/\s+/g, "-")
-        .includes((id || "").replace("-care", ""))
+  let filtered = categoryProducts.filter((p) => {
     const matchesBrand =
       selectedBrands.length === 0 || selectedBrands.includes(p.brand)
     const matchesPrice = p.price >= priceRange[0] && p.price <= priceRange[1]
     const matchesAvailability = (!inStockOnly || p.inStock) && (!onSaleOnly || Boolean(p.originalPrice && p.originalPrice > p.price))
-    return matchesCat && matchesBrand && matchesPrice && matchesAvailability
+    return matchesBrand && matchesPrice && matchesAvailability
   })
 
   if (sort === "Price: Low to High")
@@ -85,6 +100,10 @@ export default function CategoryPage() {
     filtered = [...filtered].sort((a, b) => b.price - a.price)
   if (sort === "Top Rated")
     filtered = [...filtered].sort((a, b) => b.rating - a.rating)
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const safePage = Math.min(page, totalPages)
+  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
 
   const toggleBrand = (b: string) =>
     setSelectedBrands((prev) =>
@@ -215,6 +234,8 @@ export default function CategoryPage() {
                   className="mt-3"
                   onClick={() => {
                     setSelectedBrands([])
+                    setInStockOnly(false)
+                    setOnSaleOnly(false)
                     setPriceRange([0, maxPrice])
                   }}
                 >
@@ -222,8 +243,9 @@ export default function CategoryPage() {
                 </Button>
               </div>
             ) : (
-              <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {filtered.map((product) => (
+              <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+                {pageItems.map((product) => (
                   <div
                     key={product.id}
                     role="button"
@@ -283,21 +305,10 @@ export default function CategoryPage() {
                           e.stopPropagation()
                           toggleWishlist(product.id)
                         }}
-                        className={`absolute top-2 right-2 w-7 h-7 rounded-full bg-white/90 flex items-center justify-center shadow-sm transition-all ${wishlist.includes(product.id) ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                        className="absolute top-2 right-2 flex h-9 w-9 items-center justify-center rounded-full bg-white text-[var(--primary)] shadow-sm transition-colors hover:bg-[var(--rose-light)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
                         aria-label={wishlist.includes(product.id) ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}
                       >
-                        <svg
-                          width="12"
-                          height="12"
-                          viewBox="0 0 24 24"
-                          fill={
-                            wishlist.includes(product.id) ? "#B5697A" : "none"
-                          }
-                          stroke="#B5697A"
-                          strokeWidth="2"
-                        >
-                          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
-                        </svg>
+                        <Heart size={15} fill={wishlist.includes(product.id) ? 'currentColor' : 'none'} aria-hidden="true" />
                       </button>
                     </div>
                     <div className="p-3">
@@ -311,19 +322,21 @@ export default function CategoryPage() {
                         {product.name}
                       </button>
                       <div className="flex items-center gap-1 mt-1">
-                        <StarRating rating={product.rating} />
-                        <span className="text-[10px] text-[var(--muted-foreground)]">
-                          ({product.reviews.toLocaleString()})
-                        </span>
+                        {product.reviews > 0 && (
+                          <>
+                            <StarRating rating={product.rating} />
+                            <span className="text-[10px] text-[var(--muted-foreground)]">({product.reviews.toLocaleString()})</span>
+                          </>
+                        )}
                       </div>
                       <div className="flex items-center justify-between mt-2">
                         <div>
                           <span className="text-sm font-bold">
-                            ${product.price.toFixed(2)}
+                            ₱{product.price.toFixed(2)}
                           </span>
                           {product.originalPrice && (
                             <span className="text-[10px] text-[var(--muted-foreground)] line-through ml-1">
-                              ${product.originalPrice.toFixed(2)}
+                              ₱{product.originalPrice.toFixed(2)}
                             </span>
                           )}
                         </div>
@@ -352,6 +365,43 @@ export default function CategoryPage() {
                   </div>
                 ))}
               </div>
+              <div className="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:justify-between">
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length} products
+                </p>
+                {totalPages > 1 && (
+                  <nav className="flex items-center gap-1.5" aria-label="Product pages">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage === 1}
+                      onClick={() => { setPage(safePage - 1); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+                    >
+                      Previous
+                    </Button>
+                    {Array.from({ length: totalPages }, (_, index) => index + 1).map(number => (
+                      <button
+                        key={number}
+                        type="button"
+                        onClick={() => { setPage(number); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+                        aria-current={number === safePage ? 'page' : undefined}
+                        className={`min-w-8 h-8 px-2 rounded-[var(--radius)] text-sm font-medium transition-colors ${number === safePage ? 'bg-[var(--primary)] text-white' : 'text-[var(--muted-foreground)] hover:bg-[var(--secondary)]'}`}
+                      >
+                        {number}
+                      </button>
+                    ))}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage === totalPages}
+                      onClick={() => { setPage(safePage + 1); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+                    >
+                      Next
+                    </Button>
+                  </nav>
+                )}
+              </div>
+              </>
             )}
           </div>
         </div>
