@@ -6,14 +6,19 @@ import { Plus, Edit2, Eye, FileDown, BarChart2, Brain, Lightbulb, Users, Shoppin
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { Button, Badge, DataTable, Modal, Input, Select, Card, EmptyState, Tabs, LoadingState } from '../../components/ui';
 import AdminSidebar from '../../components/AdminSidebar';
-import { createPurchaseOrder, fetchAdminUsers, fetchCustomers, fetchProductSales, fetchPurchaseProducts, fetchPurchases, fetchRecommendationRules, fetchSuppliers, fetchTransactions, fetchSalesSummary, manageUser, receivePurchaseOrder, saveRecommendationRule, setCustomerAccountStatus, setSupplierProducts, setSupplierStatus, upsertSupplier } from '../../lib/adminData';
+import { createPurchaseOrder, createSupplierBrand, createSupplierCatalog, fetchAdminUsers, fetchCategoryOptions, fetchCustomers, fetchProductSales, fetchPurchaseCatalog, fetchPurchases, fetchRecommendationRules, fetchSuppliers, fetchTransactions, fetchSalesSummary, manageUser, receivePurchaseOrder, saveRecommendationRule, setCustomerAccountStatus, setSupplierStatus, upsertSupplier } from '../../lib/adminData';
+import type { PurchaseCatalogProduct } from '../../lib/adminData';
 import { isSupabaseConfigured, supabase } from '../../lib/supabase';
 import { recommendProducts } from '../../lib/recommendations';
 import { useCatalog } from '../../context/CatalogContext';
-import { hasModulePermission } from '../../lib/permissions';
+import { getFirstAdminRoute, hasModulePermission } from '../../lib/permissions';
 import { safeImage } from '../../lib/image';
+import SupplierCatalogFields, { emptySupplierProduct, validateSupplierCatalog } from '../../components/SupplierCatalogFields';
+import type { SupplierCategoryOption, SupplierProductDraft } from '../../components/SupplierCatalogFields';
 
 // ─── Suppliers ────────────────────────────────────────────────────────────────
+
+
 export function AdminSuppliers() {
   const [view, setView] = useState<'list' | 'profile'>('list');
   const [selected, setSelected] = useState<any>(null);
@@ -25,38 +30,82 @@ export function AdminSuppliers() {
   const [editingSupplierId, setEditingSupplierId] = useState<string | null>(null);
   const [savingSupplier, setSavingSupplier] = useState(false);
   const [addForm, setAddForm] = useState({ name: '', contactName: '', email: '', phone: '', address: '' });
-  const [productOptions, setProductOptions] = useState<{ id: string; name: string }[]>([]);
-  const [linkedProducts, setLinkedProducts] = useState<string[]>([]);
+  const [brandName, setBrandName] = useState('');
+  const [productDrafts, setProductDrafts] = useState<SupplierProductDraft[]>([emptySupplierProduct()]);
+  const [categoryOptions, setCategoryOptions] = useState<SupplierCategoryOption[]>([]);
+  const [brandSupplier, setBrandSupplier] = useState<any>(null);
+  const [savingBrand, setSavingBrand] = useState(false);
   const { toasts, add: addToast, remove } = useToast();
   const setF = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => setAddForm(p => ({ ...p, [k]: e.target.value }));
 
   useEffect(() => {
     void fetchSuppliers().then(setSupplierList).catch(error => addToast('error', error.message));
-    void fetchPurchaseProducts().then(setProductOptions).catch(error => addToast('error', error.message));
+    void fetchCategoryOptions().then(setCategoryOptions).catch(error => addToast('error', error.message));
   }, []);
 
   const openAddSupplier = () => {
     setEditingSupplierId(null);
     setAddForm({ name: '', contactName: '', email: '', phone: '', address: '' });
-    setLinkedProducts([]);
+    setBrandName('');
+    setProductDrafts([emptySupplierProduct()]);
     setAddOpen(true);
   };
 
   const openEditSupplier = (supplier: any) => {
     setEditingSupplierId(supplier.id);
     setAddForm({ name: supplier.name, contactName: supplier.contact === 'N/A' ? '' : supplier.contact, email: supplier.email, phone: supplier.phone, address: supplier.address || '' });
-    setLinkedProducts(supplier.productIds || []);
     setAddOpen(true);
+  };
+
+  const openAddBrand = (supplier: any) => {
+    setBrandSupplier(supplier);
+    setBrandName('');
+    setProductDrafts([emptySupplierProduct()]);
+  };
+
+  const closeAddBrand = () => {
+    if (savingBrand) return;
+    setBrandSupplier(null);
+  };
+
+  const saveBrand = async () => {
+    if (!brandSupplier) return;
+    const validationError = validateSupplierCatalog(brandName, productDrafts);
+    if (validationError) { addToast('error', validationError); return; }
+    setSavingBrand(true);
+    try {
+      await createSupplierBrand({ supplierId: brandSupplier.id, brandName, products: productDrafts });
+      const refreshed = await fetchSuppliers();
+      setSupplierList(refreshed);
+      setSelected((current: any) => current ? refreshed.find(row => row.id === current.id) || current : current);
+      addToast('success', `Brand "${brandName.trim()}" added to ${brandSupplier.name}.`);
+      setBrandSupplier(null);
+      setBrandName('');
+      setProductDrafts([emptySupplierProduct()]);
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : 'Unable to add brand.');
+    } finally {
+      setSavingBrand(false);
+    }
   };
 
   const saveSupplier = async () => {
     if (!addForm.name.trim()) { addToast('error', 'Supplier name is required.'); return; }
+    const validationError = editingSupplierId ? '' : validateSupplierCatalog(brandName, productDrafts);
+    if (validationError) { addToast('error', validationError); return; }
     setSavingSupplier(true);
     try {
-      const savedSupplierId = await upsertSupplier(addForm, editingSupplierId || undefined);
-      if (savedSupplierId) await setSupplierProducts(savedSupplierId, linkedProducts);
+      if (editingSupplierId) {
+        await upsertSupplier(addForm, editingSupplierId);
+      } else {
+        await createSupplierCatalog({
+          supplier: addForm,
+          brandName,
+          products: productDrafts,
+        });
+      }
       setSupplierList(await fetchSuppliers());
-      addToast('success', editingSupplierId ? 'Supplier updated.' : 'Supplier added.');
+      addToast('success', editingSupplierId ? 'Supplier updated.' : 'Supplier, brand, products, and variants added.');
       setAddOpen(false);
       setEditingSupplierId(null);
     } catch (cause) {
@@ -127,10 +176,13 @@ export function AdminSuppliers() {
           <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-6">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-12 h-12 rounded-full bg-[var(--primary)]/20 flex items-center justify-center text-lg font-bold text-[var(--primary)]">{selected.name[0]}</div>
-              <div>
+              <div className="flex-1">
                 <h2 className="font-semibold">{selected.name}</h2>
                 <Badge variant={selected.status === 'Active' ? 'success' : 'muted'}>{selected.status}</Badge>
               </div>
+              {selected.status !== 'Archived' && (
+                <Button variant="outline" onClick={() => openAddBrand(selected)}><Plus size={14} /> Add Brand</Button>
+              )}
             </div>
             {[['Contact', selected.contact], ['Email', selected.email], ['Phone', selected.phone], ['Address', selected.address || 'N/A'], ['Product Count', String(selected.products || 0)], ['Products Supplied', (selected.productNames || []).join(', ') || 'None linked'], ['Brands Carried', (selected.brands || []).join(', ') || 'None'], ['Brand Count', String(selected.brandCount || 0)], ['Variants Available', String(selected.variantCount || 0)], ['Last Order', selected.lastOrder]].map(([k, v]) => (
               <div key={k} className="flex justify-between py-2 border-b border-[var(--border)] last:border-0 text-sm">
@@ -201,6 +253,7 @@ export function AdminSuppliers() {
                   ) : (
                     <>
                       <button title="View supplier" aria-label={`View ${row.name}`} onClick={() => { setSelected(row as any); setView('profile'); }} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Eye size={14} /></button>
+                      <button title="Add brand" aria-label={`Add brand to ${row.name}`} onClick={() => openAddBrand(row)} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Plus size={14} /></button>
                       <button title="Edit supplier" aria-label={`Edit ${row.name}`} onClick={() => openEditSupplier(row)} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors"><Edit2 size={14} /></button>
                       <button title={row.status === 'Active' ? 'Deactivate supplier' : 'Reactivate supplier'} aria-label={`${row.status === 'Active' ? 'Deactivate' : 'Reactivate'} ${row.name}`} onClick={() => void changeSupplierStatus(row)} className="p-1.5 hover:bg-[var(--secondary)] rounded text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors">{row.status === 'Active' ? <XCircle size={14} /> : <CheckCircle size={14} />}</button>
                       <button title="Archive supplier" aria-label={`Archive ${row.name}`} onClick={() => setArchiveSupplierId(row.id)} className="p-1.5 hover:bg-red-50 rounded text-[var(--muted-foreground)] hover:text-red-500 transition-colors"><Archive size={14} /></button>
@@ -212,35 +265,43 @@ export function AdminSuppliers() {
           />
         </div>
       </div>
-      <Modal open={addOpen} onClose={() => setAddOpen(false)} title={editingSupplierId ? 'Edit Supplier' : 'Add Supplier'}>
+      <Modal open={addOpen} onClose={() => setAddOpen(false)} title={editingSupplierId ? 'Edit Supplier' : 'Add Supplier'} size={editingSupplierId ? 'md' : 'lg'}>
         <div className="flex flex-col gap-4">
           <Input label="Supplier Name *" value={addForm.name} onChange={setF('name')} placeholder="e.g. P&G Distribution PH" />
           <Input label="Contact Person" value={addForm.contactName} onChange={setF('contactName')} placeholder="Ana Cruz" />
           <Input label="Email" type="email" value={addForm.email} onChange={setF('email')} placeholder="contact@supplier.com" />
           <Input label="Phone" value={addForm.phone} onChange={setF('phone')} placeholder="+63 2 8123 4567" />
           <Input label="Address" value={addForm.address} onChange={setF('address')} placeholder="Supplier address" />
-          <div>
-            <p className="text-sm font-medium mb-1">Products Supplied</p>
-            <p className="text-xs text-[var(--muted-foreground)] mb-2">Link the catalogue this supplier provides. Purchase orders and stock movements follow these links.</p>
-            <div className="max-h-40 overflow-y-auto rounded border border-[var(--border)] p-2 grid grid-cols-1 sm:grid-cols-2 gap-1">
-              {productOptions.map(product => (
-                <label key={product.id} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={linkedProducts.includes(product.id)}
-                    onChange={event => setLinkedProducts(rows => event.target.checked
-                      ? [...rows, product.id]
-                      : rows.filter(id => id !== product.id))}
-                  />
-                  <span className="truncate">{product.name}</span>
-                </label>
-              ))}
-              {!productOptions.length && <p className="text-xs text-[var(--muted-foreground)]">No active products available yet.</p>}
-            </div>
-          </div>
+          {editingSupplierId ? (
+            <p className="text-xs text-[var(--muted-foreground)]">Brands, products, and variants are set when the supplier is added. Use Add Brand to extend this supplier.</p>
+          ) : (
+            <SupplierCatalogFields
+              brandName={brandName}
+              onBrandNameChange={setBrandName}
+              products={productDrafts}
+              setProducts={setProductDrafts}
+              categories={categoryOptions}
+            />
+          )}
           <div className="flex gap-3 mt-2">
             <Button variant="outline" onClick={() => setAddOpen(false)} className="flex-1">Cancel</Button>
             <Button onClick={() => void saveSupplier()} loading={savingSupplier} className="flex-1">{editingSupplierId ? 'Save Changes' : 'Add Supplier'}</Button>
+          </div>
+        </div>
+      </Modal>
+      <Modal open={!!brandSupplier} onClose={closeAddBrand} title="Add Brand" size="lg">
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-[var(--muted-foreground)]">Adding a brand to <span className="font-semibold text-[var(--foreground)]">{brandSupplier?.name}</span>. Brand and product names must be new to the catalogue.</p>
+          <SupplierCatalogFields
+            brandName={brandName}
+            onBrandNameChange={setBrandName}
+            products={productDrafts}
+            setProducts={setProductDrafts}
+            categories={categoryOptions}
+          />
+          <div className="flex gap-3 mt-2">
+            <Button variant="outline" onClick={closeAddBrand} className="flex-1">Cancel</Button>
+            <Button onClick={() => void saveBrand()} loading={savingBrand} className="flex-1">Add Brand</Button>
           </div>
         </div>
       </Modal>
@@ -264,18 +325,24 @@ export function AdminSuppliers() {
 
 // ─── Purchases ────────────────────────────────────────────────────────────────
 const statusSteps = ['Pending', 'Approved', 'Shipped', 'Received'];
-type PurchaseLineDraft = { productId: string; quantity: string; unitCost: string };
+// One line = one variant: supplier → brand → product → variant → quantity.
+type PurchaseLineDraft = { brandId: string; productId: string; variantId: string; quantity: string };
+const emptyLine = (): PurchaseLineDraft => ({ brandId: '', productId: '', variantId: '', quantity: '1' });
+const isBlankLine = (line: PurchaseLineDraft) => !line.brandId && !line.productId && !line.variantId;
+const isCompleteLine = (line: PurchaseLineDraft) =>
+  Boolean(line.brandId && line.productId && line.variantId)
+  && Number.isInteger(Number(line.quantity)) && Number(line.quantity) > 0;
 
 export function AdminPurchases() {
   const [createOpen, setCreateOpen] = useState(false);
   const [purchaseList, setPurchaseList] = useState<any[]>([]);
   const [supplierList, setSupplierList] = useState<any[]>([]);
-  const [productList, setProductList] = useState<{ id: string; name: string }[]>([]);
+  const [catalog, setCatalog] = useState<PurchaseCatalogProduct[]>([]);
   const [supplierId, setSupplierId] = useState('');
   const [expectedDelivery, setExpectedDelivery] = useState('');
   const [paymentTerms, setPaymentTerms] = useState('');
   const [notes, setNotes] = useState('');
-  const [items, setItems] = useState<PurchaseLineDraft[]>([{ productId: '', quantity: '1', unitCost: '' }]);
+  const [items, setItems] = useState<PurchaseLineDraft[]>([emptyLine()]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -284,10 +351,10 @@ export function AdminPurchases() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [purchases, suppliers, products] = await Promise.all([fetchPurchases(), fetchSuppliers(), fetchPurchaseProducts()]);
+      const [purchases, suppliers, products] = await Promise.all([fetchPurchases(), fetchSuppliers(), fetchPurchaseCatalog()]);
       setPurchaseList(purchases);
       setSupplierList(suppliers);
-      setProductList(products);
+      setCatalog(products);
       setError('');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to load purchase order data.');
@@ -297,25 +364,68 @@ export function AdminPurchases() {
   };
   useEffect(() => { void loadData(); }, []);
 
+  // Editing a choice invalidates everything below it, and completing the last
+  // line immediately opens a fresh one so a multi-line order is one click each.
   const updateItem = (index: number, patch: Partial<PurchaseLineDraft>) => {
-    setItems(rows => rows.map((item, rowIndex) => rowIndex === index ? { ...item, ...patch } : item));
+    setItems(rows => {
+      const next = rows.map((row, rowIndex) => {
+        if (rowIndex !== index) return row;
+        const merged = { ...row, ...patch };
+        if ('brandId' in patch) { merged.productId = ''; merged.variantId = ''; }
+        if ('productId' in patch) merged.variantId = '';
+        return merged;
+      });
+      const last = next[next.length - 1];
+      if (next.length === index + 1 && isCompleteLine(last)) next.push(emptyLine());
+      return next;
+    });
   };
-  const total = items.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unitCost) || 0), 0);
+
+  const activeSuppliers = supplierList.filter(supplier => supplier.status === 'Active');
+  const supplierProducts = catalog.filter(product => product.supplierId === supplierId);
+  // Brands the selected supplier actually carries, derived from its products.
+  const brandOptions = Array.from(new Map(supplierProducts.map(product => [product.brandId, product.brandName])).entries())
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const lineProducts = (line: PurchaseLineDraft) => supplierProducts.filter(product => product.brandId === line.brandId);
+  const lineVariants = (line: PurchaseLineDraft) => supplierProducts.find(product => product.id === line.productId)?.variants || [];
+
+  // The unit cost is looked up from the catalog so this preview can show the
+  // grand total only — it is never rendered per line and never posted.
+  const total = items.reduce((sum, line) => {
+    const variant = supplierProducts.find(product => product.id === line.productId)?.variants.find(v => v.id === line.variantId);
+    return sum + (variant ? (Number(line.quantity) || 0) * variant.unitCost : 0);
+  }, 0);
+  // Lines become variants on the purchase order once product and variant are
+  // picked; the blank spare row the form appends is not counted.
+  const completeLineCount = items.filter(isCompleteLine).length;
 
   const resetForm = () => {
     setSupplierId('');
     setExpectedDelivery('');
     setPaymentTerms('');
     setNotes('');
-    setItems([{ productId: '', quantity: '1', unitCost: '' }]);
+    setItems([emptyLine()]);
   };
 
   const savePurchaseOrder = async () => {
     if (!supplierId) { addToast('error', 'Select a supplier.'); return; }
-    if (!items.length || items.some(item => !item.productId || !Number.isInteger(Number(item.quantity)) || Number(item.quantity) <= 0 || !Number.isFinite(Number(item.unitCost)) || Number(item.unitCost) < 0 || item.unitCost.trim() === '')) {
-      addToast('error', 'Choose a product and enter a positive quantity and valid unit cost for every line.');
-      return;
+
+    // Fully empty rows are ignored; anything half-filled blocks the order so a
+    // line is never silently dropped.
+    const completeLines: PurchaseLineDraft[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const line = items[i];
+      if (isBlankLine(line)) continue;
+      if (!line.brandId) { addToast('error', `Line ${i + 1}: choose a brand.`); return; }
+      if (!line.productId) { addToast('error', `Line ${i + 1}: choose a product.`); return; }
+      if (!line.variantId) { addToast('error', `Line ${i + 1}: choose a variant.`); return; }
+      if (!Number.isInteger(Number(line.quantity)) || Number(line.quantity) <= 0) {
+        addToast('error', `Line ${i + 1}: enter a whole-number quantity greater than zero.`); return;
+      }
+      completeLines.push(line);
     }
+    if (!completeLines.length) { addToast('error', 'Add at least one variant to the purchase order.'); return; }
 
     setSaving(true);
     try {
@@ -324,7 +434,11 @@ export function AdminPurchases() {
         expectedDelivery,
         paymentTerms,
         notes,
-        items: items.map(item => ({ productId: item.productId, quantity: Number(item.quantity), unitCost: Number(item.unitCost) })),
+        items: completeLines.map(line => ({
+          productId: line.productId,
+          variantId: line.variantId,
+          quantity: Number(line.quantity),
+        })),
       });
       addToast('success', 'Purchase order created.');
       setCreateOpen(false);
@@ -336,8 +450,6 @@ export function AdminPurchases() {
       setSaving(false);
     }
   };
-
-  const activeSuppliers = supplierList.filter(supplier => supplier.status === 'Active');
 
   const markReceived = async (row: any) => {
     if (!row.purchaseOrderId) { addToast('error', 'This purchase order is missing its database id.'); return; }
@@ -356,10 +468,10 @@ export function AdminPurchases() {
       <div className="flex flex-col gap-6 animate-fade-in">
         <div className="flex items-center justify-between">
           <div><h1 className="text-xl font-bold">Purchase Orders</h1><p className="text-sm text-[var(--muted-foreground)]">{purchaseList.length} purchase orders</p></div>
-          <Button onClick={() => setCreateOpen(true)} disabled={!activeSuppliers.length || !productList.length}><Plus size={15} /> Create PO</Button>
+          <Button onClick={() => setCreateOpen(true)} disabled={!activeSuppliers.length || !catalog.length}><Plus size={15} /> Create PO</Button>
         </div>
         {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-        {!loading && !error && (!activeSuppliers.length || !productList.length) && <p className="text-sm text-[var(--muted-foreground)]">Add an active supplier and at least one active product before creating a purchase order.</p>}
+        {!loading && !error && (!activeSuppliers.length || !catalog.length) && <p className="text-sm text-[var(--muted-foreground)]">Add an active supplier and at least one active product before creating a purchase order.</p>}
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <DataTable
             data={purchaseList as any}
@@ -395,26 +507,58 @@ export function AdminPurchases() {
         </div>
         <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create Purchase Order" size="lg">
           <div className="flex flex-col gap-4">
-            <Select label="Supplier" value={supplierId} onChange={event => setSupplierId(event.target.value)} options={[{ value: '', label: 'Select supplier…' }, ...activeSuppliers.map(supplier => ({ value: supplier.id, label: supplier.name }))]} />
+            <Select label="Supplier" value={supplierId} onChange={event => { setSupplierId(event.target.value); setItems([emptyLine()]); }} options={[{ value: '', label: 'Select supplier…' }, ...activeSuppliers.map(supplier => ({ value: supplier.id, label: supplier.name }))]} />
             <div className="grid grid-cols-2 gap-3">
               <Input label="Expected Delivery" type="date" value={expectedDelivery} onChange={event => setExpectedDelivery(event.target.value)} />
               <Input label="Payment Terms" value={paymentTerms} onChange={event => setPaymentTerms(event.target.value)} placeholder="e.g. Net 30" />
             </div>
             <div>
               <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold">Order Items</h3>
-                <Button size="sm" variant="outline" onClick={() => setItems(rows => [...rows, { productId: '', quantity: '1', unitCost: '' }])}><Plus size={13} /> Add Line</Button>
+                <h3 className="text-sm font-semibold">
+                  Order Items{' '}
+                  <span className="font-normal text-[var(--muted-foreground)]">— {completeLineCount} variant{completeLineCount === 1 ? '' : 's'} added</span>
+                </h3>
+                <Button size="sm" variant="outline" onClick={() => setItems(rows => [...rows, emptyLine()])}><Plus size={13} /> Add Line</Button>
               </div>
               <div className="flex flex-col gap-3">
                 {items.map((item, index) => (
-                  <div key={index} className="grid grid-cols-2 sm:grid-cols-[minmax(0,1fr)_88px_120px_32px] items-end gap-2">
-                    <Select label={index === 0 ? 'Product' : undefined} value={item.productId} onChange={event => updateItem(index, { productId: event.target.value })} options={[{ value: '', label: 'Select product…' }, ...productList.map(product => ({ value: product.id, label: product.name }))]} className="col-span-2 sm:col-span-1" />
+                  <div key={index} className="grid grid-cols-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_88px_32px] items-end gap-2">
+                    <Select
+                      label={index === 0 ? 'Brand' : undefined}
+                      value={item.brandId}
+                      onChange={event => updateItem(index, { brandId: event.target.value })}
+                      options={supplierId
+                        ? [{ value: '', label: 'Select brand…' }, ...brandOptions.map(brand => ({ value: brand.id, label: brand.name }))]
+                        : [{ value: '', label: 'Select supplier first…' }]}
+                      disabled={!supplierId}
+                      className="col-span-2 sm:col-span-1"
+                    />
+                    <Select
+                      label={index === 0 ? 'Product' : undefined}
+                      value={item.productId}
+                      onChange={event => updateItem(index, { productId: event.target.value })}
+                      options={item.brandId
+                        ? [{ value: '', label: 'Select product…' }, ...lineProducts(item).map(product => ({ value: product.id, label: product.name }))]
+                        : [{ value: '', label: 'Select brand first…' }]}
+                      disabled={!item.brandId}
+                      className="col-span-2 sm:col-span-1"
+                    />
+                    <Select
+                      label={index === 0 ? 'Variant' : undefined}
+                      value={item.variantId}
+                      onChange={event => updateItem(index, { variantId: event.target.value })}
+                      options={item.productId
+                        ? [{ value: '', label: 'Select variant…' }, ...lineVariants(item).map(variant => ({ value: variant.id, label: variant.label }))]
+                        : [{ value: '', label: 'Select product first…' }]}
+                      disabled={!item.productId}
+                      className="col-span-2 sm:col-span-1"
+                    />
                     <Input label={index === 0 ? 'Qty' : undefined} type="number" min="1" step="1" value={item.quantity} onChange={event => updateItem(index, { quantity: event.target.value })} />
-                    <Input label={index === 0 ? 'Unit Cost' : undefined} type="number" min="0" step="0.01" value={item.unitCost} onChange={event => updateItem(index, { unitCost: event.target.value })} placeholder="0.00" />
-                    <button type="button" title="Remove line" aria-label={`Remove product line ${index + 1}`} disabled={items.length === 1} onClick={() => setItems(rows => rows.filter((_, rowIndex) => rowIndex !== index))} className="mb-2 p-1.5 rounded text-[var(--muted-foreground)] hover:bg-[var(--secondary)] disabled:opacity-40"><XCircle size={16} /></button>
+                    <button type="button" title="Remove line" aria-label={`Remove variant line ${index + 1}`} disabled={items.length === 1} onClick={() => setItems(rows => rows.filter((_, rowIndex) => rowIndex !== index))} className="mb-2 p-1.5 rounded text-[var(--muted-foreground)] hover:bg-[var(--secondary)] disabled:opacity-40"><XCircle size={16} /></button>
                   </div>
                 ))}
               </div>
+              {!supplierId && <p className="mt-2 text-xs text-[var(--muted-foreground)]">Choose a supplier first — the brands, products, and variants below come from its catalogue.</p>}
             </div>
             <Input label="Notes" value={notes} onChange={event => setNotes(event.target.value)} placeholder="Optional notes…" />
             <div className="flex justify-end border-t border-[var(--border)] pt-3 text-sm font-semibold">Total: ₱{total.toFixed(2)}</div>
@@ -1370,6 +1514,19 @@ export function AdminUsers() {
     }
   };
 
+  const changeAccountStatus = async (target: any, status: 'Active' | 'Inactive') => {
+    if (target.id === user?.id || target.accountStatus === status) return;
+    const verb = status === 'Active' ? 'activate' : 'archive';
+    if (!window.confirm(`Are you sure you want to ${verb} ${target.name}? ${status === 'Inactive' ? 'They will no longer be able to sign in.' : 'They will regain access.'}`)) return;
+    try {
+      await manageUser({ action: 'status', id: target.id, status });
+      addToast('success', status === 'Active' ? `${target.name} was activated.` : `${target.name} was archived.`);
+      await loadData();
+    } catch (cause) {
+      addToast('error', cause instanceof Error ? cause.message : `Unable to ${verb} this user.`);
+    }
+  };
+
   return (
     <AdminSidebar>
       <ToastContainer toasts={toasts} onRemove={remove} />
@@ -1397,6 +1554,36 @@ export function AdminUsers() {
                 </select>
               )},
               { key: 'createdAt', label: 'Created', render: (row: any) => new Date(row.createdAt).toLocaleDateString() },
+              { key: 'accountStatus', label: 'Status', render: (row: any) => (
+                <Badge variant={row.accountStatus === 'Active' ? 'success' : 'muted'}>{row.accountStatus || 'Active'}</Badge>
+              )},
+              { key: 'actions', label: 'Actions', sortable: false, render: (row: any) => {
+                const isSelf = row.id === user?.id;
+                return (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isSelf || row.accountStatus !== 'Active'}
+                      onClick={() => void changeAccountStatus(row, 'Inactive')}
+                      title={isSelf ? 'You cannot archive your own account' : `Archive ${row.name}`}
+                      aria-label={`Archive ${row.name}`}
+                      className="p-1.5 rounded text-[var(--muted-foreground)] transition-colors hover:bg-red-50 hover:text-red-500 disabled:opacity-40 disabled:hover:bg-transparent"
+                    >
+                      <Archive size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSelf || row.accountStatus === 'Active'}
+                      onClick={() => void changeAccountStatus(row, 'Active')}
+                      title={isSelf ? 'You cannot change your own account' : `Activate ${row.name}`}
+                      aria-label={`Activate ${row.name}`}
+                      className="p-1.5 rounded text-[var(--muted-foreground)] transition-colors hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-40 disabled:hover:bg-transparent"
+                    >
+                      <RotateCcw size={14} />
+                    </button>
+                  </div>
+                );
+              }},
             ]}
           />
         </div>
@@ -1493,7 +1680,7 @@ export function AdminLogin() {
     setLoading(true); setError('');
     try {
       const result = await login(email, password, 'admin');
-      if (result.ok) navigate('/admin/dashboard');
+      if (result.ok) navigate(getFirstAdminRoute(result.user ?? null) ?? '/admin/dashboard');
       else setError(result.error || 'Login failed. Check your admin credentials.');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Login failed. Check your admin credentials.');

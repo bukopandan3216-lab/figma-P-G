@@ -1,6 +1,6 @@
 # P&G Beauty — Entity Relationship Diagram
 
-**Source of truth:** [`schema_complete.sql`](schema_complete.sql) — the consolidated schema that is live on Supabase (project `lvtlehesxweckggyemnm`).
+**Source of truth:** [`schema/idempotent/schema_complete.sql`](schema/idempotent/schema_complete.sql) — the canonical schema that is live on Supabase (project `lvtlehesxweckggyemnm`). Fresh installs use [`schema/split/schema_fresh.sql`](schema/split/schema_fresh.sql); existing databases use [`schema/split/schema_upgrade.sql`](schema/split/schema_upgrade.sql).
 **Diagram formats:** Mermaid (paste into GitHub preview / mermaid.live) and DBML (import into dbdiagram.io).
 
 ## Identifier convention
@@ -19,7 +19,7 @@ Every table has a **surrogate primary key named after the entity it identifies**
 | `ORDERS.orders_ID` | `orders.order_id` | ORDERS |
 | `SUPPORT_INQUIRIES.support_inquiries_ID` | `support_inquiries.inquiry_id` | SUPPORT_INQUIRIES |
 
-Junction and child tables keep their natural composite or entity keys (`supplier_products(supplier_id, product_id)`, `cart_items(user_id, product_id)`).
+Child tables keep their natural entity keys. `cart_items` uses a surrogate `cart_item_id` because its identity includes a nullable `variant_id` — uniqueness is enforced by the expression index `(user_id, product_id, coalesce(variant_id, nil))` so two variants of one product can share a cart.
 
 ---
 
@@ -35,8 +35,6 @@ erDiagram
     PRODUCT_VARIANTS ||--|| INVENTORY : variant_id
 
     SUPPLIERS ||--o{ BRANDS : supplier_id
-    SUPPLIERS ||--o{ SUPPLIER_PRODUCTS : supplier_id
-    PRODUCTS ||--o{ SUPPLIER_PRODUCTS : product_id
     SUPPLIERS ||--o{ PURCHASE_ORDERS : supplier_id
     PROFILES ||--o{ PURCHASE_ORDERS : created_by
     PURCHASE_ORDERS ||--o{ PURCHASE_ORDER_ITEMS : purchase_order_id
@@ -97,7 +95,7 @@ erDiagram
         uuid brand_id PK
         text name UK
         text description
-        uuid supplier_id "optional default supplier"
+        uuid supplier_id FK "owning supplier (required)"
         timestamptz created_at
     }
 
@@ -136,9 +134,10 @@ erDiagram
         uuid variant_id PK
         uuid product_id FK
         text size
-        text scent
         numeric additional_price
+        numeric supplier_price "hidden cost = listing / 1.30"
         text sku UK
+        text_array images "up to 5 photos per variant"
     }
 
     INVENTORY {
@@ -158,11 +157,6 @@ erDiagram
         text address
         text status "Active|Inactive|Archived"
         timestamptz created_at
-    }
-
-    SUPPLIER_PRODUCTS {
-        uuid supplier_id PK_FK
-        uuid product_id PK_FK
     }
 
     PURCHASE_ORDERS {
@@ -279,8 +273,9 @@ erDiagram
     }
 
     CART_ITEMS {
-        uuid user_id PK_FK
-        uuid product_id PK_FK
+        uuid cart_item_id PK
+        uuid user_id FK
+        uuid product_id FK
         uuid variant_id FK
         int quantity
         timestamptz updated_at
@@ -348,6 +343,13 @@ erDiagram
         text review "10..1200 chars"
         timestamptz created_at
     }
+
+    ROLE_PERMISSIONS {
+        text role PK "value of profiles.role, not an FK"
+        text module PK
+        text action PK
+        timestamptz created_at
+    }
 ```
 
 ---
@@ -355,7 +357,7 @@ erDiagram
 ## DBML
 
 ```dbml
-// External, managed by Supabase Auth — not created by schema_complete.sql
+// External, managed by Supabase Auth — not created by schema/idempotent/schema_complete.sql
 Table auth_users {
   id uuid [pk]
 }
@@ -379,7 +381,7 @@ Table brands {
   brand_id uuid [pk]
   name text [unique, not null]
   description text
-  supplier_id uuid [ref: > suppliers.supplier_id, note: `optional default supplier`]
+  supplier_id uuid [not null, ref: > suppliers.supplier_id, note: 'owning supplier - required']
   created_at timestamptz [not null, default: `now()`]
 }
 
@@ -417,10 +419,12 @@ Table products {
 Table product_variants {
   variant_id uuid [pk]
   product_id uuid [not null, ref: > products.product_id]
-  size text
-  scent text
+  size text [not null]
   additional_price numeric [not null, default: 0.00]
+  supplier_price numeric [not null, default: 0.00, note: 'hidden supplier cost - purchase order unit_cost']
   sku text [unique, not null]
+  images text[] [not null, default: '{}', note: 'per-variant photos, max 5, public product-images URLs']
+  expiry_date date [note: 'null = no expiry; expired/near-expiry (<= today+60d) hidden from customers']
 }
 
 Table inventory {
@@ -440,11 +444,6 @@ Table suppliers {
   address text
   status text [not null, default: 'Active', note: 'Active | Inactive | Archived']
   created_at timestamptz [not null, default: `now()`]
-}
-
-Table supplier_products {
-  supplier_id uuid [pk, not null, ref: > suppliers.supplier_id]
-  product_id uuid [pk, not null, ref: > products.product_id]
 }
 
 Table purchase_orders {
@@ -561,10 +560,15 @@ Table user_activity_log {
 }
 
 Table cart_items {
-  user_id uuid [pk, not null, ref: > profiles.user_id]
-  product_id uuid [pk, not null, ref: > products.product_id]
+  cart_item_id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid [not null, ref: > profiles.user_id]
+  product_id uuid [not null, ref: > products.product_id]
   variant_id uuid [ref: > product_variants.variant_id]
   quantity integer [not null]
+
+  indexes {
+    (user_id, product_id, coalesce(variant_id, "00000000-0000-0000-0000-000000000000")) [unique, name: 'cart_items_user_product_variant_key']
+  }
   updated_at timestamptz [not null, default: `now()`]
 }
 
@@ -630,6 +634,15 @@ Table product_reviews {
   review text [not null, note: '10..1200 chars']
   created_at timestamptz [not null, default: `now()`]
 }
+
+Table role_permissions {
+  role text [pk, note: 'beauty_staff | beauty_admin; super_admin bypasses, customer has no rows']
+  module text [pk, note: 'dashboard | products | inventory | suppliers | purchases | customers | activity | sales | insights | recommendations | reports | support | users | settings']
+  action text [pk, note: 'view | create | edit | manage | generate | export | respond | delete']
+  created_at timestamptz [not null, default: `now()`]
+
+  Note: 'RBAC grant matrix - single source of truth for has_permission()/get_my_permissions(). RLS enabled with NO policies (nobody reads it directly; only the security-definer functions do).'
+}
 ```
 
 ---
@@ -646,8 +659,6 @@ Table product_reviews {
 | `PROFILES.profiles_ID ?< INVENTORY_MOVEMENTS.created_by` | `profiles.user_id → inventory_movements.created_by` (1:N, nullable) |
 | `ORDERS.orders_ID ?< INVENTORY_MOVEMENTS.order_id` | `orders.order_id → inventory_movements.order_id` (1:N, nullable, set null) |
 | `PURCHASE_ORDERS.purchase_orders_ID ?< INVENTORY_MOVEMENTS.purchase_order_id` | `purchase_orders.purchase_order_id → inventory_movements.purchase_order_id` (1:N, nullable, set null) |
-| `SUPPLIERS.suppliers_ID < SUPPLIER_PRODUCTS.supplier_ID` | `suppliers.supplier_id → supplier_products.supplier_id` (1:N) |
-| `PRODUCTS.products_ID < SUPPLIER_PRODUCTS.products_ID` | `products.product_id → supplier_products.product_id` (1:N) |
 | `SUPPLIERS.suppliers_ID < PURCHASE_ORDERS.supplier_id` | `suppliers.supplier_id → purchase_orders.supplier_id` (1:N) |
 | `PROFILES.profiles_ID < PURCHASE_ORDERS.created_by` | `profiles.user_id → purchase_orders.created_by` (1:N) |
 | `PURCHASE_ORDERS.purchase_orders_ID < PURCHASE_ORDER_ITEMS.purchase_order_id` | `purchase_orders.purchase_order_id → purchase_order_items.purchase_order_id` (1:N) |
@@ -703,27 +714,74 @@ Additional real relationships also modelled in the schema (beyond your draft):
 
 1. **Every PK is named after its entity** (`product_id`, `brand_id`, `variant_id`) and every FK uses the *same* name as the PK it points to — that is why `products.brand_id` points at `brands.brand_id`, and it is what makes the ERD self-documenting.
 2. **Stock is tracked per variant, not per product.** `inventory.variant_id` is unique: one stock row per SKU. `product_variants` is what connects catalogue to stock.
-3. **Suppliers own the products.** `supplier_products` is a junction table (many-to-many): one supplier can provide many products and one product can be sourced from several suppliers. `purchase_orders` then point at a supplier, and `purchase_order_items` at the exact product/variant ordered. `brands.supplier_id` exists as an *optional* default supplier for a brand, but the app reads supplier→product exclusively through `supplier_products` (the Suppliers page audit therefore counts brands/products/variants as supplier → `supplier_products` → `products` → `brands` / `product_variants`).
+3. **Suppliers own the products through brands.** `brands.supplier_id` is required: one supplier owns many unique brands, each brand owns its products, and each product owns its size variants. The chain is `suppliers -> brands -> products -> product_variants`; there is no supplier/product junction table. `purchase_orders` point at the supplier, and `purchase_order_items` at the exact product/variant ordered. The Suppliers page audit therefore counts brands/products/variants through this ownership chain.
 4. **Every stock change is a ledger row.** `inventory_movements` is append-only and carries the reason: `order_id` (customer bought it) or `purchase_order_id` (supplier delivered it), plus `created_by` for who did it, `stock_after` (units remaining once the movement is applied) and `user_document` (the actor's `profiles.document_number`).
 5. **Orders snapshot the shipping details** in `orders` rather than referencing `user_addresses`, so the historical order keeps the address that was used at purchase time.
-6. **Row Level Security** is enabled on all 25 tables; the `has_permission(module, action)` function maps the four roles to modules, and the browser never talks to tables directly for privileged actions — it calls RPCs (`place_order`, `record_inventory_movement`, `create_purchase_order`, `receive_purchase_order`, `submit_product_review`).
+6. **Row Level Security** is enabled on all 25 tables; every policy and privileged RPC calls `has_permission(module, action)`, which looks the role's grants up in the `role_permissions` table (single source of truth; `super_admin` bypasses, `customer` has no rows), and the browser never talks to tables directly for privileged actions — it calls RPCs (`place_order`, `record_inventory_movement`, `create_purchase_order`, `receive_purchase_order`, `submit_product_review`, `get_variant_supplier_costs`). The logged-in admin also fetches `get_my_permissions()` once per profile load so the UI hides/locks what the database would refuse anyway.
 7. **Every account gets a document number.** `handle_new_user()` stamps `profiles.document_number` from the `document_no_seq` sequence (`DOC-000001` style), which is what the Customers page shows and what the inventory ledger records as `inventory_movements.user_document`.
 8. **Discounts expire in the database, not just in the UI.** `expire_discounts()` reverts `products.price ← products.original_price`, clears `sale_price` / `discount_*`, and returns the products that just expired; `AdminDashboard` calls it on mount and every 30 seconds so a finished sale can never still show a strikethrough price.
 9. **Ratings are derived, never stored twice.** `products.rating` and `products.reviews` are recalculated by the `refresh_product_rating` trigger on every `product_reviews` insert/update/delete, and the public product page reads the review rows live.
 10. **The activity log is deliberately split.** `audit_user_activity()` (the `pg_audit` trigger) only records *staff* actions and returns early for customers and anonymous sessions; customer events are produced by `get_customer_activity()` (`order.placed`, `order.received`, `order.cancelled`, `support.ticket_submitted`) plus explicit `log_customer_activity('ai.chat', …)` calls from the beauty chat. Loyalty tiers come from `get_customer_segment()` so app and database can never disagree. Its `event_id` is `<entity-id>:<event>` (e.g. `5467c3a1-…:received`) because one order is reported by more than one branch (placed + received, or placed + cancelled) — a bare entity id would repeat and render duplicate React keys in the Activity Log table. `DataTable` additionally suffixes any colliding row key as a safety net.
-11. **Guest access needs grants *and* RLS.** PostgREST returns `401 permission denied for table X` whenever a table-level `GRANT` is missing — even when RLS would hide every row — so the signed-out storefront needs `SELECT` on `supplier_products` / `suppliers` (embedded by the catalog query) and on `support_inquiries` (to return an insert representation) while their policies stay staff-only, so guests still read zero rows. Guests insert support tickets through `support_inquiries_guest_insert` (`user_id is null`), and reviewer names come from the `review_authors` view rather than a `profiles()` embed, which 401s for guests, is filtered to `NULL` for other customers, and would expose reviewer emails.
+11. **Guest access needs grants *and* RLS.** PostgREST returns `401 permission denied for table X` whenever a table-level `GRANT` is missing — even when RLS would hide every row — so the signed-out storefront needs `SELECT` on `suppliers` when embedded by admin-owned queries and on `support_inquiries` (to return an insert representation) while their policies stay staff-only, so guests still read zero rows. Guests insert support tickets through `support_inquiries_guest_insert` (`user_id is null`), and reviewer names come from the product-scoped `get_product_review_authors` RPC rather than a `profiles()` embed, which 401s for guests, is filtered to `NULL` for other customers, and would expose reviewer emails. The RPC is `security definer` with a fixed empty `search_path` and returns only display-name columns for reviewers of the requested product; the old `security_invoker = off` view was removed.
+12. **Supplier cost is hidden and derived, never typed.** Each variant stores `product_variants.supplier_price`, the app listing price divided by 1.30 — the 30% markup lives in exactly one constant, `SUPPLIER_MARKUP_PERCENT` in `src/lib/catalog.ts`, so changing it changes no customer-facing price (shop prices are stored, never computed from cost). Purchase orders post only `variant_id` + `quantity`; `create_purchase_order` fills `purchase_order_items.unit_cost` server-side from that column and refuses a line when the supplier does not carry the product, so a cost can be neither faked nor shown. The column is also revoked from `anon` and `authenticated` (every other `product_variants` column the storefront and admins use stays granted), so nobody can read costs by calling PostgREST directly — the Purchases page gets them from `get_variant_supplier_costs`, which demands `purchases/view`. The admin modal reveals only the grand total, and `receive_purchase_order` increases stock for the exact variant ordered.
+13. **Roles are enforced in three layers that all read one table.** `role_permissions` (32 seeded grants) is the only place a permission is written down: the sidebar hides modules it has no grant for (`hasModulePermission` prefers the map returned by `get_my_permissions()` and falls back to the static mirror in `src/lib/permissions.ts`), the router wraps every admin page in `RequirePermission`, and PostgRLS re-checks `has_permission()` inside every policy — so copying a URL or calling PostgREST directly gets the same answer as the UI.
+14. **Product photos and variant photos never mix.** `products.image` / `products.images` (max 8, `{productId}/{uuid}.webp`) are the only photos used by cards, cart lines and wishlist items. `product_variants.images` (max 5, `{productId}/variants/{variantId}/{uuid}.webp`, enforced by `product_variants_images_max_check`) belong to one selectable variant and replace the detail-page and quick-view gallery while that variant is the effective selection (`selectedVariants[label] || options[0]`); variants without photos fall back to the product gallery. Because `product_variants` exposes column-level `SELECT` grants, `images` is listed in that grant list (inside `supabase/schema/idempotent/schema_complete.sql`) or every catalog read would 401.
+15. **Expiry is per variant and hides the SKU, not the product.** `product_variants.expiry_date` (nullable in the database for legacy rows, but required in the admin UI and every seed) is shown in admin Products / Inventory and watched on the Dashboard. `Expired` = `expiry_date <= current_date`, `Near Expiry` = `<= current_date + 60 days`; both are removed from the storefront catalog (the product stays listed while another variant is sellable, and disappears only when none are), and `place_order` re-checks the date server-side so a cart built before the flag cannot be checked out. Because it is a readable `product_variants` column, `expiry_date` is part of the column-level `SELECT` grant list (inside `supabase/schema/idempotent/schema_complete.sql`).
+
+---
+
+## Roles & permission matrix
+
+Four roles live in `profiles.role` (`customer | beauty_staff | beauty_admin | super_admin`). Grants are rows in `role_permissions(role, module, action)`; `has_permission(module, action)` reads that table (`super_admin` → always true, `customer` → always false, inactive accounts → false), and `get_my_permissions()` returns the caller's whole map (`{ module: [actions] }`) for the UI.
+
+| Module | `super_admin` | `beauty_admin` | `beauty_staff` | `customer` |
+|---|---|---|---|---|
+| dashboard | all | view | — | — |
+| products | all | view, create, edit, delete | — | — |
+| inventory | all | view, create, edit, manage | view, manage | — |
+| suppliers | all | view, create, edit, delete | — | — |
+| purchases | all | view, create, manage, delete | — | — |
+| customers | all | view, manage | — | — |
+| activity | all | view | view | — |
+| sales | all | view, manage | — | — |
+| insights | all | view | — | — |
+| recommendations | all | view | — | — |
+| reports | all | view, generate, export | — | — |
+| support | all | view, respond | — | — |
+| users | all (bypass) | — (hidden) | — (hidden) | — |
+| settings | all (bypass) | — (hidden) | — (hidden) | — |
+
+`super_admin` has no rows — it bypasses the lookup entirely, so it inherits every future grant automatically (all 14 modules × 8 actions from `get_my_permissions()`). 32 seeded rows = 29 for `beauty_admin` + 3 for `beauty_staff`.
+
+Enforcement layers, all consulting the same table:
+
+1. **UI** — `hasModulePermission()` (`src/lib/permissions.ts`) prefers `user.permissions` (fetched once per profile load via `get_my_permissions()`) and falls back to the static mirror; the sidebar filters its items and action buttons disable without the grant.
+2. **Routes** — `RequirePermission` in `src/App.tsx` sends an unpermitted admin to `getFirstAdminRoute(user)` (e.g. `beauty_staff` lands on `/admin/inventory`).
+3. **Database** — every RLS policy and privileged RPC re-evaluates `has_permission()`, and `role_permissions` itself has RLS enabled with **no policies** plus revoked grants (only the security-definer functions read it).
+
+## Bootstrap admin accounts
+
+Seeded by `supabase/admin_accounts.sql` (run with `psql -v account_pwd=…`; the password never appears in a file):
+
+| Email | Role | Status | Purpose |
+|---|---|---|---|
+| `beautyadmin@pgbeauty.test` | `beauty_admin` | Active | Full admin except Users & Settings (replaces `admin@`, `admin2@` — their roles, POs and stock movements were transferred here) |
+| `beautystaff@pgbeauty.test` | `beauty_staff` | Active | Inventory + Activity Log only (replaces `1admin@`) |
+| `admin3@pgbeauty.test` | `super_admin` | Active | Remaining super admin — owns Users & Settings |
+
+The retired accounts `admin@pgbeauty.test`, `admin2@pgbeauty.test` and `1admin@pgbeauty.test` were deleted from `auth.users` (profiles cascade); their audit history was preserved: 24 purchase orders + 82 stock movements now belong to `beautyadmin@`, and the 3 seeded orders were reassigned to `maria.santos@pgbeauty.test`.
 
 ---
 
 ## App-to-Schema Audit
 
-**Audit scope:** Every `supabase.from('table')` and `supabase.rpc('fn')` call in `src/` was compared against `schema_complete.sql`.
+**Audit scope:** Every `supabase.from('table')` and `supabase.rpc('fn')` call in `src/` was compared against `schema/idempotent/schema_complete.sql`.
 
-**Environment note:** `.env.local` carries `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` for the project `lvtlehesxweckggyemnm`. This audit started as a static code-level comparison (app query surface vs. the consolidated schema file) and was then verified by executing `schema_complete.sql` against that live project, so `schema_complete.sql` is both the source of truth and the deployed state.
+**Environment note:** `.env.local` carries `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` for the project `lvtlehesxweckggyemnm`. This audit started as a static code-level comparison (app query surface vs. the consolidated schema file) and was then verified by executing `schema/idempotent/schema_complete.sql` against that live project, so `schema/idempotent/schema_complete.sql` is both the source of truth and the deployed state.
 
 ### Result: MATCH — no discrepancies
 
-All 25 tables, 4 views, and every RPC/Edge Function the app calls are defined in `schema_complete.sql`. All column names referenced in the app's `.select()` / `.insert()` / `.update()` calls exist on the corresponding tables.
+All 25 tables, 4 views, and every RPC/Edge Function the app calls are defined in `schema/idempotent/schema_complete.sql`. All column names referenced in the app's `.select()` / `.insert()` / `.update()` calls exist on the corresponding tables.
 
 ### Tables used by the app (all 25 present in schema)
 
@@ -736,33 +794,32 @@ All 25 tables, 4 views, and every RPC/Edge Function the app calls are defined in
 | 5 | `product_variants` | Catalog variants, inventory, order items, purchase items | ✅ Defined |
 | 6 | `inventory` | Stock reads, low-stock alerts, stock mutations | ✅ Defined |
 | 7 | `suppliers` | Supplier CRUD, purchase orders | ✅ Defined |
-| 8 | `supplier_products` | Supplier–product junction | ✅ Defined |
-| 9 | `purchase_orders` | PO lifecycle, receive flow | ✅ Defined |
-| 10 | `purchase_order_items` | PO line items | ✅ Defined |
-| 11 | `orders` | Checkout, order history, transactions, sales | ✅ Defined |
-| 12 | `order_items` | Order line items | ✅ Defined |
-| 13 | `payments` | Written by `place_order` RPC | ✅ Defined |
-| 14 | `inventory_movements` | Written by `place_order` / `record_inventory_movement` / `receive_purchase_order` | ✅ Defined |
-| 15 | `cart_items` | Cart context, wishlist/insights reads | ✅ Defined |
-| 16 | `wishlist_items` | Wishlist context, insights reads | ✅ Defined |
-| 17 | `user_addresses` | Customer account addresses | ✅ Defined |
-| 18 | `user_payment_methods` | Customer account payment methods | ✅ Defined |
-| 19 | `recommendation_rules` | Recommendation engine rules | ✅ Defined |
-| 20 | `recommendations` | "For You" recommendations | ✅ Defined |
-| 21 | `customer_product_interactions` | Behavior tracking, recommendations | ✅ Defined |
-| 22 | `user_activity_log` | Staff actions via the `audit_user_activity` trigger + explicit `log_customer_activity('ai.chat')` from the chat; customer events are derived by `get_customer_activity()` | ✅ Defined |
-| 23 | `support_inquiries` | Support tickets (chat + admin inbox) | ✅ Defined |
-| 24 | `support_responses` | Support agent replies | ✅ Defined |
-| 25 | `product_reviews` | Product reviews via `submit_product_review` RPC | ✅ Defined |
+| 8 | `purchase_orders` | PO lifecycle, receive flow | ✅ Defined |
+| 9 | `purchase_order_items` | PO line items | ✅ Defined |
+| 10 | `orders` | Checkout, order history, transactions, sales | ✅ Defined |
+| 11 | `order_items` | Order line items | ✅ Defined |
+| 12 | `payments` | Written by `place_order` RPC | ✅ Defined |
+| 13 | `inventory_movements` | Written by `place_order` / `record_inventory_movement` / `receive_purchase_order` | ✅ Defined |
+| 14 | `cart_items` | Cart context, wishlist/insights reads | ✅ Defined |
+| 15 | `wishlist_items` | Wishlist context, insights reads | ✅ Defined |
+| 16 | `user_addresses` | Customer account addresses | ✅ Defined |
+| 17 | `user_payment_methods` | Customer account payment methods | ✅ Defined |
+| 18 | `recommendation_rules` | Recommendation engine rules | ✅ Defined |
+| 19 | `recommendations` | "For You" recommendations | ✅ Defined |
+| 20 | `customer_product_interactions` | Behavior tracking, recommendations | ✅ Defined |
+| 21 | `user_activity_log` | Staff actions via the `audit_user_activity` trigger + explicit `log_customer_activity('ai.chat')` from the chat; customer events are derived by `get_customer_activity()` | ✅ Defined |
+| 22 | `support_inquiries` | Support tickets (chat + admin inbox) | ✅ Defined |
+| 23 | `support_responses` | Support agent replies | ✅ Defined |
+| 24 | `product_reviews` | Product reviews via `submit_product_review` RPC | ✅ Defined |
+| 25 | `role_permissions` | Not queried directly — read only by `has_permission()` (every RLS policy) and `get_my_permissions()` (AuthContext) | ✅ Defined + seeded (32 grants) |
 
-### Views used by the app (all 4 present in schema)
+### Views used by the app (all 3 present in schema)
 
 | # | View | App usage | Schema status |
 |---|------|-----------|---------------|
-| 26 | `product_sales` | Admin sales summary, dashboard | ✅ Defined |
-| 27 | `sales_by_month` | Admin dashboard sales trend | ✅ Defined |
-| 28 | `underperforming_products` | Defined in schema; not yet queried by frontend | ✅ Defined |
-| 29 | `review_authors` | Product detail Reviews tab - reviewer names for guests (`security_invoker = off`, first/last name only) | ✅ Defined |
+| 27 | `product_sales` | Admin sales summary, dashboard | ✅ Defined |
+| 28 | `sales_by_month` | Admin dashboard sales trend | ✅ Defined |
+| 29 | `underperforming_products` | Defined in schema; not yet queried by frontend | ✅ Defined |
 
 ### RPCs called by the app (all present in schema)
 
@@ -770,7 +827,7 @@ All 25 tables, 4 views, and every RPC/Edge Function the app calls are defined in
 |---|-----|--------|---------------|
 | 1 | `place_order` | `src/lib/catalog.ts` (`createOrder`) | ✅ Defined + granted |
 | 2 | `record_inventory_movement` | `src/pages/admin/AdminInventory.tsx` | ✅ Defined + granted |
-| 3 | `create_purchase_order` | `src/lib/adminData.ts` | ✅ Defined + granted |
+| 3 | `create_purchase_order` | `src/lib/adminData.ts` — variant-level lines (`product_id` + `variant_id` + `quantity`); validates the product is owned by a brand of that supplier and reads `unit_cost` from the hidden `product_variants.supplier_price` | ✅ Defined + granted |
 | 4 | `receive_purchase_order` | `src/lib/adminData.ts` | ✅ Defined + granted |
 | 5 | `submit_product_review` | `src/components/ProductModal.tsx` | ✅ Defined + granted |
 | 6 | `touch_user_activity` | `src/context/AuthContext.tsx` | ✅ Defined + granted |
@@ -781,14 +838,20 @@ All 25 tables, 4 views, and every RPC/Edge Function the app calls are defined in
 | 11 | `expire_discounts` | `src/lib/catalog.ts` (`expireEndedDiscounts`), fired by `AdminDashboard.tsx` on mount and every 30s | ✅ Defined + granted |
 | 12 | `log_customer_activity` | `src/components/FloatingChat.tsx` (`ai.chat` only) | ✅ Defined + granted |
 | 13 | `touch_customer_activity` | Defined in schema; not yet called by frontend | ✅ Defined |
+| 14 | `get_variant_supplier_costs` | `src/lib/adminData.ts` (`fetchPurchaseCatalog`) — returns hidden `supplier_price` rows for the PO grand total; gated by `purchases/view`, and the column itself is revoked from `anon`/`authenticated` | ✅ Defined + granted |
+| 15 | `get_my_permissions` | `src/context/AuthContext.tsx` (non-customer profile load) — returns `{ module: [actions] }` from `role_permissions`; UI fallback when the RPC is unavailable | ✅ Defined + granted |
+| 16 | `get_search_suggestions` | `src/lib/searchSuggestions.ts` (`CustomerNav`) - up to five frequent products and five non-cancelled top sellers; guests get the global interaction fallback | Defined + granted |
+| 17 | `get_product_review_authors` | `src/pages/customer/ProductDetailPage.tsx` - product-scoped reviewer display names; only name columns are returned, with execute limited to `anon, authenticated` | Defined + granted |
 
 ### RPCs that exist for database triggers (not called by the frontend)
 
 | # | RPC | Purpose | Schema status |
 |---|-----|---------|---------------|
-| 14 | `handle_new_user` | `auth` trigger — fills `first_name`, `last_name`, `email`, `skin_profile` and stamps `profiles.document_number` from `document_no_seq` | ✅ Defined |
-| 15 | `audit_user_activity` | `pg_audit` trigger — **staff-only**: returns early for customers and for unauthenticated sessions | ✅ Defined |
-| 16 | `refresh_product_rating` | Trigger `trg_refresh_product_rating` keeps `products.rating` / `products.reviews` in sync with `product_reviews` | ✅ Defined |
+| 16 | `handle_new_user` | `auth` trigger — fills `first_name`, `last_name`, `email`, `skin_profile` and stamps `profiles.document_number` from `document_no_seq` | ✅ Defined |
+| 17 | `audit_user_activity` | `pg_audit` trigger — **staff-only**: returns early for customers and for unauthenticated sessions | ✅ Defined |
+| 18 | `refresh_product_rating` | Trigger `trg_refresh_product_rating` keeps `products.rating` / `products.reviews` in sync with `product_reviews` | ✅ Defined |
+
+`has_permission(module, action)` is not called by the frontend directly — it is the security-definer helper inside every RLS policy and privileged RPC (table lookup in `role_permissions`).
 
 ### Sequences
 
@@ -806,7 +869,7 @@ All 25 tables, 4 views, and every RPC/Edge Function the app calls are defined in
 
 | # | Bucket | App usage | Schema status |
 |---|--------|-----------|---------------|
-| 1 | `product-images` | `src/lib/productImages.ts` (upload/remove product photos) | ✅ Defined + policies |
+| 1 | `product-images` | `src/lib/productImages.ts` (upload/remove product photos and per-variant photos under `{productId}/variants/{variantId}/`) | ✅ Defined + policies |
 
 ### Columns referenced by the app that exist in the schema
 
@@ -816,17 +879,16 @@ Every column referenced in app queries was verified present:
 - `brands`: brand_id, name, description, supplier_id, created_at
 - `categories`: category_id, name, description, image, created_at
 - `products`: product_id, brand_id, category_id, name, description, price, original_price, sale_price, discount_type, discount_value, discount_start, discount_end, image, images, tags, rating, reviews, badge, status, created_at
-- `product_variants`: variant_id, product_id, size, scent, additional_price, sku
+- `product_variants`: variant_id, product_id, size, additional_price, supplier_price, sku, images, expiry_date
 - `inventory`: inventory_id, variant_id, stock_quantity, reorder_level, updated_at
 - `suppliers`: supplier_id, name, contact_name, contact_email, phone, address, status, created_at
-- `supplier_products`: supplier_id, product_id
 - `purchase_orders`: purchase_order_id, created_by, supplier_id, status, total_cost, expected_delivery, payment_terms, notes, created_at, po_no
 - `purchase_order_items`: purchase_order_item_id, purchase_order_id, product_id, variant_id, quantity, unit_cost
 - `orders`: order_id, user_id, total_amount, subtotal, shipping_fee, tax, status, payment_status, stripe_payment_intent_id, payment_method, shipping_name, shipping_email, shipping_phone, shipping_address, shipping_city, shipping_zip, shipping_country, created_at, order_no
 - `order_items`: order_item_id, order_id, variant_id, quantity, price_at_purchase
 - `payments`: payment_id, order_id, provider, provider_reference, status, amount, created_at
 - `inventory_movements`: movement_id, variant_id, movement_type, quantity, stock_after, user_document, reference, notes, created_by, created_at, movement_no, order_id, purchase_order_id
-- `cart_items`: user_id, product_id, variant_id, quantity, updated_at
+- `cart_items`: cart_item_id, user_id, product_id, variant_id, quantity, updated_at
 - `wishlist_items`: user_id, product_id, created_at
 - `user_addresses`: address_id, user_id, label, full_name, line1, city, zip, phone, is_default, created_at, updated_at
 - `user_payment_methods`: payment_method_id, user_id, method_type, label, detail, is_default, created_at
@@ -837,5 +899,6 @@ Every column referenced in app queries was verified present:
 - `support_inquiries`: inquiry_id, user_id, customer_name, email, subject, message, status, channel, sentiment, support_reply, last_reply, created_at
 - `support_responses`: response_id, inquiry_id, customer_name, email, response, sent_at
 - `product_reviews`: review_id, product_id, user_id, rating, review, created_at
+- `role_permissions`: role, module, action, created_at (composite PK `role + module + action`)
 
-**Conclusion:** `schema_complete.sql` is the accurate, complete source of truth for the Supabase database that the running app uses. No schema drift was detected.
+**Conclusion:** `schema/idempotent/schema_complete.sql` is the accurate, complete source of truth for the Supabase database that the running app uses. No schema drift was detected.

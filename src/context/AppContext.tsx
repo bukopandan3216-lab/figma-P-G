@@ -4,7 +4,11 @@ import { supabase } from '../lib/supabase';
 import { recordCustomerInteraction } from '../lib/recommendations';
 
 export interface CartItem {
+  // id = product id; variantId narrows it to one SKU of that product.
   id: string;
+  // key = id + variantId. A cart can hold two variants of the same product, so
+  // every lookup must use this key instead of the bare product id.
+  key: string;
   name: string;
   brand: string;
   price: number;
@@ -12,14 +16,18 @@ export interface CartItem {
   qty: number;
   stock?: number;
   inStock?: boolean;
-  variant?: string;
+  variantId?: string;
+  variantLabel?: string;
 }
 
 interface AppCtx {
   cart: CartItem[];
-  addToCart: (item: Omit<CartItem, 'qty'>) => void;
-  removeFromCart: (id: string) => void;
-  updateQty: (id: string, qty: number) => void;
+  // Every cart line must name the exact SKU, so the same product can be bought
+  // in two variants without the price/stock of one leaking into the other.
+  addToCart: (item: Omit<CartItem, 'qty' | 'key' | 'variantId'> & { variantId: string }) => void;
+  removeFromCart: (key: string) => void;
+  updateQty: (key: string, qty: number) => void;
+  clearCart: () => void;
   cartCount: number;
   cartTotal: number;
   wishlist: string[];
@@ -28,13 +36,26 @@ interface AppCtx {
 
 const Ctx = createContext<AppCtx | null>(null);
 
+export const cartKey = (id: string, variantId?: string | null) => (variantId ? `${id}::${variantId}` : id);
+
+// Rows saved by older builds have no key and used `variant` as the variant id.
+const normalizeItem = (item: Partial<CartItem> & { id: string; variant?: string }): CartItem => {
+  const variantId = item.variantId || item.variant || undefined;
+  return {
+    ...item,
+    variantId,
+    key: item.key || cartKey(item.id, variantId),
+  } as CartItem;
+};
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const readLocalData = () => {
     try {
       const savedCart = localStorage.getItem('pgbeauty-cart');
       const savedWishlist = localStorage.getItem('pgbeauty-wishlist');
+      const parsed = savedCart ? (JSON.parse(savedCart) as (Partial<CartItem> & { id: string; variant?: string })[]) : [];
       return {
-        cart: savedCart ? (JSON.parse(savedCart) as CartItem[]) : [],
+        cart: parsed.filter(item => item && item.id).map(normalizeItem),
         wishlist: savedWishlist ? (JSON.parse(savedWishlist) as string[]) : [],
       };
     } catch {
@@ -58,16 +79,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const mergeCart = (serverCart: CartItem[], guestCart: CartItem[]) => {
     const merged = new Map<string, CartItem>();
     [...guestCart, ...serverCart].forEach((item) => {
-      const existing = merged.get(item.id);
+      const existing = merged.get(item.key);
       if (existing) {
-        merged.set(item.id, {
+        merged.set(item.key, {
           ...existing,
           ...item,
           qty: existing.qty + item.qty,
           price: item.price || existing.price,
         });
       } else {
-        merged.set(item.id, { ...item });
+        merged.set(item.key, { ...item });
       }
     });
     return Array.from(merged.values());
@@ -79,20 +100,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
       let cancelled = false;
 
       void Promise.all([
-        supabase.from('cart_items').select('product_id, quantity, variant_id, products(id:product_id, name, price, image, brands(name))').eq('user_id', user.id),
+        supabase.from('cart_items').select('product_id, quantity, variant_id, products(id:product_id, name, price, image, brands(name)), product_variants(size)').eq('user_id', user.id),
         supabase.from('wishlist_items').select('product_id').eq('user_id', user.id),
       ]).then(([cartResult, wishlistResult]) => {
         if (cancelled) return;
 
-        const serverCart = (cartResult.data || []).map((row: any) => ({
-          id: row.product_id,
-          name: row.products?.name || 'Product',
-          brand: row.products?.brands?.name || '',
-          price: Number(row.products?.price || 0),
-          image: row.products?.image || '',
-          qty: Number(row.quantity || 0),
-          variant: row.variant_id || undefined,
-        }));
+        const serverCart = (cartResult.data || []).map((row: any) => {
+          const variant = Array.isArray(row.product_variants) ? row.product_variants[0] : row.product_variants;
+          return normalizeItem({
+            id: row.product_id,
+            name: row.products?.name || 'Product',
+            brand: row.products?.brands?.name || '',
+            price: Number(row.products?.price || 0),
+            image: row.products?.image || '',
+            qty: Number(row.quantity || 0),
+            variantId: row.variant_id || undefined,
+            variantLabel: variant?.size || undefined,
+          });
+        });
         const serverWishlist = (wishlistResult.data || []).map((row: any) => row.product_id);
 
         if (serverCart.length || serverWishlist.length) {
@@ -125,47 +150,74 @@ export function AppProvider({ children }: { children: ReactNode }) {
     persistLocalData(cart, wishlist);
   }, [cart, wishlist]);
 
-  const addToCart = (item: Omit<CartItem, 'qty'>) => {
+  // cart_items has one row per (user, product, variant). Supabase cannot target
+  // the expression unique index from onConflict, so replace the matching row.
+  const replaceServerRow = async (item: CartItem, quantity: number) => {
+    if (!user) return;
+    let removeQuery = supabase.from('cart_items').delete().eq('user_id', user.id).eq('product_id', item.id);
+    removeQuery = item.variantId ? removeQuery.eq('variant_id', item.variantId) : removeQuery.is('variant_id', null);
+    await removeQuery;
+    await supabase.from('cart_items').insert({
+      user_id: user.id,
+      product_id: item.id,
+      variant_id: item.variantId || null,
+      quantity,
+    });
+  };
+
+  const deleteServerRow = async (item: CartItem) => {
+    if (!user) return;
+    let query = supabase.from('cart_items').delete().eq('user_id', user.id).eq('product_id', item.id);
+    query = item.variantId ? query.eq('variant_id', item.variantId) : query.is('variant_id', null);
+    await query;
+  };
+
+  const addToCart = (item: Omit<CartItem, 'qty' | 'key' | 'variantId'> & { variantId: string }) => {
+    if (!item.variantId) return;
     const stockLimit = typeof item.stock === 'number' ? item.stock : 0;
     if (!Number.isFinite(stockLimit) || stockLimit <= 0) return;
 
-    const existing = cart.find(i => i.id === item.id);
+    const key = cartKey(item.id, item.variantId);
+    const existing = cart.find(i => i.key === key);
     if (existing && typeof existing.stock === 'number' && existing.qty >= existing.stock) return;
     if (existing && typeof item.stock === 'number' && existing.qty + 1 > item.stock) return;
 
     const nextQuantity = (existing?.qty || 0) + 1;
     const nextCart = existing
-      ? cart.map(i => i.id === item.id ? { ...i, qty: i.qty + 1, stock: i.stock ?? item.stock, inStock: (i.stock ?? item.stock ?? 0) > 0 } : i)
-      : [...cart, { ...item, qty: 1, stock: item.stock, inStock: item.inStock ?? (item.stock ?? 0) > 0 }];
+      ? cart.map(i => i.key === key ? { ...i, qty: i.qty + 1, stock: i.stock ?? item.stock, inStock: (i.stock ?? item.stock ?? 0) > 0 } : i)
+      : [...cart, { ...item, key, qty: 1, stock: item.stock, inStock: item.inStock ?? (item.stock ?? 0) > 0 }];
 
     setCart(nextCart);
     persistLocalData(nextCart, wishlist);
 
-    if (user) void supabase.from('cart_items').upsert({
-      user_id: user.id,
-      product_id: item.id,
-      quantity: nextQuantity,
-      variant_id: item.variant || existing?.variant || null,
-    }, { onConflict: 'user_id,product_id' });
+    const nextItem = nextCart.find(i => i.key === key);
+    if (nextItem) void replaceServerRow(nextItem, nextQuantity);
     if (user) void recordCustomerInteraction(user.id, item.id, 'cart').catch(error => console.error('Unable to record cart interaction:', error));
   };
-  const removeFromCart = (id: string) => {
-    const nextCart = cart.filter(i => i.id !== id);
+  const removeFromCart = (key: string) => {
+    const item = cart.find(i => i.key === key);
+    const nextCart = cart.filter(i => i.key !== key);
     setCart(nextCart);
     persistLocalData(nextCart, wishlist);
-    if (user) void supabase.from('cart_items').delete().eq('user_id', user.id).eq('product_id', id);
+    if (item) void deleteServerRow(item);
   };
-  const updateQty = (id: string, qty: number) => {
+  const updateQty = (key: string, qty: number) => {
     if (qty <= 0) {
-      removeFromCart(id);
+      removeFromCart(key);
       return;
     }
 
-    const nextCart = cart.map(i => i.id === id ? { ...i, qty } : i);
+    const item = cart.find(i => i.key === key);
+    const nextCart = cart.map(i => i.key === key ? { ...i, qty } : i);
     setCart(nextCart);
     persistLocalData(nextCart, wishlist);
 
-    if (user) void supabase.from('cart_items').update({ quantity: qty, updated_at: new Date().toISOString() }).eq('user_id', user.id).eq('product_id', id);
+    if (item) void replaceServerRow(item, qty);
+  };
+  const clearCart = () => {
+    setCart([]);
+    persistLocalData([], wishlist);
+    if (user) void supabase.from('cart_items').delete().eq('user_id', user.id);
   };
   const toggleWishlist = (id: string) => {
     const exists = wishlist.includes(id);
@@ -186,7 +238,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const cartTotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
 
   return (
-    <Ctx.Provider value={{ cart, addToCart, removeFromCart, updateQty, cartCount, cartTotal, wishlist, toggleWishlist }}>
+    <Ctx.Provider value={{ cart, addToCart, removeFromCart, updateQty, clearCart, cartCount, cartTotal, wishlist, toggleWishlist }}>
       {children}
     </Ctx.Provider>
   );

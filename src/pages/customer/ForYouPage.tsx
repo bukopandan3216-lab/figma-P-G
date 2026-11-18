@@ -8,6 +8,7 @@ import { useCart } from '../../context/AppContext';
 import { Button, StarRating, Badge, LoadingState } from '../../components/ui';
 import CustomerNav from '../../components/CustomerNav';
 import { safeImage } from '../../lib/image';
+import { resolveVariant } from '../../lib/variant';
 
 export default function ForYouPage() {
   const navigate = useNavigate();
@@ -111,8 +112,8 @@ export default function ForYouPage() {
             <h2 className="font-semibold">Your #1 Match</h2>
           </div>
           <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] overflow-hidden flex flex-col sm:flex-row">
-            <div className="sm:w-48 aspect-square sm:aspect-auto bg-[var(--secondary)] flex-shrink-0 overflow-hidden">
-              <img src={safeImage(topPick.image, topPick.name)} alt={topPick.name} className="w-full h-full object-cover" />
+            <div className="w-full aspect-square sm:h-48 sm:w-48 bg-[var(--secondary)] flex-shrink-0 overflow-hidden">
+              <img src={safeImage(topPick.image, topPick.name)} alt={topPick.name} className="w-full h-full object-cover transition-transform duration-500 hover:scale-105" />
             </div>
             <div className="p-6 flex flex-col justify-center flex-1">
               <div className="flex items-center gap-2 mb-2">
@@ -125,8 +126,8 @@ export default function ForYouPage() {
               <p className="text-sm text-[var(--muted-foreground)] mt-2 mb-4 max-w-lg">{topPick.description}</p>
               <p className="text-xs text-[var(--muted-foreground)] mb-4">{topRecommendation.reason}</p>
               <div className="flex items-center gap-3">
-                <span className="text-2xl font-bold">₱{topPick.price.toFixed(2)}</span>
-                <Button onClick={() => { trackRecommendationClick(topRecommendation); addToCart({ id: topPick.id, name: topPick.name, brand: topPick.brand, price: topPick.price, image: topPick.image, stock: topPick.stock, inStock: topPick.inStock }); }}>Add to Cart</Button>
+                <span className="text-2xl font-bold">₱{resolveVariant(topPick).price.toFixed(2)}</span>
+                <Button onClick={() => { trackRecommendationClick(topRecommendation); addToCart({ id: topPick.id, name: topPick.name, brand: topPick.brand, price: resolveVariant(topPick).price, image: topPick.image, stock: resolveVariant(topPick).stock, inStock: topPick.inStock && resolveVariant(topPick).stock > 0, variantId: resolveVariant(topPick).variantId, variantLabel: resolveVariant(topPick).label }); }}>Add to Cart</Button>
                 <Link to={`/product/${topPick.id}`} onClick={() => trackRecommendationClick(topRecommendation)}><Button variant="outline">View Details</Button></Link>
               </div>
             </div>
@@ -147,7 +148,7 @@ export default function ForYouPage() {
                   tabIndex={0}
                   onClick={() => { trackRecommendationClick(recommendation); navigate(`/product/${product.id}`); }}
                   onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); navigate(`/product/${product.id}`); } }}
-                  className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300 cursor-pointer"
+                  className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden transition-all duration-300 cursor-pointer hover:-translate-y-1 hover:shadow-lg"
                 >
                   <div className="relative aspect-square overflow-hidden bg-[var(--secondary)]">
                     <img src={safeImage(product.image, product.name)} alt={product.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
@@ -168,8 +169,8 @@ export default function ForYouPage() {
                       <StarRating rating={product.rating} />
                     </div>
                     <div className="flex items-center justify-between mt-2">
-                      <span className="text-sm font-bold">₱{product.price.toFixed(2)}</span>
-                      <Button size="sm" onClick={event => { event.stopPropagation(); trackRecommendationClick(recommendation); addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock }); }} disabled={!product.inStock} className="text-xs px-2.5">Add</Button>
+                      <span className="text-sm font-bold">₱{resolveVariant(product).price.toFixed(2)}</span>
+                      <Button size="sm" onClick={event => { event.stopPropagation(); trackRecommendationClick(recommendation); addToCart({ id: product.id, name: product.name, brand: product.brand, price: resolveVariant(product).price, image: product.image, stock: resolveVariant(product).stock, inStock: product.inStock && resolveVariant(product).stock > 0, variantId: resolveVariant(product).variantId, variantLabel: resolveVariant(product).label }); }} disabled={!product.inStock || resolveVariant(product).stock <= 0} className="text-xs px-2.5">Add</Button>
                     </div>
                   </div>
                 </div>
@@ -200,7 +201,7 @@ export default function ForYouPage() {
                   tabIndex={0}
                   onClick={() => navigate(`/product/${product.id}`)}
                   onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); navigate(`/product/${product.id}`); } }}
-                  className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300 cursor-pointer"
+                  className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden transition-all duration-300 cursor-pointer hover:-translate-y-1 hover:shadow-lg"
                 >
                   <div className="relative aspect-square overflow-hidden bg-[var(--secondary)]">
                     <img src={safeImage(product.image, product.name)} alt={product.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
@@ -221,8 +222,8 @@ export default function ForYouPage() {
                       <StarRating rating={product.rating} />
                     </div>
                     <div className="flex items-center justify-between mt-2">
-                      <span className="text-sm font-bold">₱{product.price.toFixed(2)}</span>
-                      <Button size="sm" onClick={event => { event.stopPropagation(); addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock }); }} disabled={!product.inStock} className="text-xs px-2.5">Add</Button>
+                      <span className="text-sm font-bold">₱{resolveVariant(product).price.toFixed(2)}</span>
+                      <Button size="sm" onClick={event => { event.stopPropagation(); addToCart({ id: product.id, name: product.name, brand: product.brand, price: resolveVariant(product).price, image: product.image, stock: resolveVariant(product).stock, inStock: product.inStock && resolveVariant(product).stock > 0, variantId: resolveVariant(product).variantId, variantLabel: resolveVariant(product).label }); }} disabled={!product.inStock || resolveVariant(product).stock <= 0} className="text-xs px-2.5">Add</Button>
                     </div>
                   </div>
                 </div>

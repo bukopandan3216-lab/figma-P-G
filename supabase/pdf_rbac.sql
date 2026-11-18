@@ -23,7 +23,7 @@ begin
     where schemaname = 'public'
       and tablename = any (array[
         'profiles', 'brands', 'categories', 'products', 'product_variants', 'inventory',
-        'suppliers', 'supplier_products', 'purchase_orders', 'purchase_order_items',
+        'suppliers', 'purchase_orders', 'purchase_order_items',
         'orders', 'order_items', 'payments', 'inventory_movements', 'recommendation_rules',
         'recommendations', 'customer_product_interactions', 'user_activity_log',
         'cart_items', 'wishlist_items', 'user_addresses', 'user_payment_methods',
@@ -336,7 +336,7 @@ declare
 begin
   foreach v_table in array array[
     'profiles', 'brands', 'categories', 'products', 'product_variants', 'inventory',
-    'inventory_movements', 'suppliers', 'supplier_products', 'purchase_orders',
+    'inventory_movements', 'suppliers', 'purchase_orders',
     'purchase_order_items', 'orders', 'order_items', 'payments', 'recommendations',
     'customer_product_interactions', 'support_inquiries', 'support_responses'
   ] loop
@@ -353,7 +353,7 @@ declare
 begin
   foreach v_table in array array[
     'profiles', 'brands', 'categories', 'products', 'product_variants', 'inventory',
-    'suppliers', 'supplier_products', 'purchase_orders', 'purchase_order_items',
+    'suppliers', 'purchase_orders', 'purchase_order_items',
     'orders', 'order_items', 'payments', 'inventory_movements', 'recommendation_rules',
     'recommendations', 'customer_product_interactions', 'user_activity_log',
     'cart_items', 'wishlist_items', 'user_addresses', 'user_payment_methods',
@@ -403,8 +403,6 @@ create policy suppliers_select on public.suppliers for select to authenticated u
 create policy suppliers_insert on public.suppliers for insert to authenticated with check (public.has_permission('suppliers', 'create'));
 create policy suppliers_update on public.suppliers for update to authenticated using (public.has_permission('suppliers', 'edit')) with check (public.has_permission('suppliers', 'edit'));
 create policy suppliers_delete on public.suppliers for delete to authenticated using (public.has_permission('suppliers', 'delete'));
-create policy supplier_products_select on public.supplier_products for select to authenticated using (public.has_permission('suppliers', 'view'));
-create policy supplier_products_write on public.supplier_products for all to authenticated using (public.has_permission('suppliers', 'edit')) with check (public.has_permission('suppliers', 'edit'));
 create policy purchase_orders_select on public.purchase_orders for select to authenticated using (public.has_permission('purchases', 'view'));
 create policy purchase_orders_write on public.purchase_orders for all to authenticated using (public.has_permission('purchases', 'manage')) with check (public.has_permission('purchases', 'manage'));
 create policy purchase_items_select on public.purchase_order_items for select to authenticated using (public.has_permission('purchases', 'view'));
@@ -477,7 +475,7 @@ grant update (first_name, last_name, phone, birthday, skin_profile) on public.pr
 grant usage on schema public to anon, authenticated;
 grant select on public.brands, public.categories, public.products, public.product_variants, public.inventory to anon, authenticated;
 grant select, insert, update, delete on public.products, public.product_variants, public.inventory to authenticated;
-grant select, insert, update, delete on public.brands, public.categories, public.suppliers, public.supplier_products,
+grant select, insert, update, delete on public.brands, public.categories, public.suppliers,
   public.purchase_orders, public.purchase_order_items, public.orders, public.order_items, public.payments,
   public.inventory_movements to authenticated;
 grant select on public.recommendation_rules to anon, authenticated;

@@ -18,6 +18,13 @@ export type AdminModule =
 
 export type PermissionAction = 'view' | 'create' | 'edit' | 'manage' | 'generate' | 'export' | 'respond' | 'delete';
 
+/**
+ * Fallback matrix used only when the get_my_permissions() RPC is unavailable
+ * (e.g. offline / Supabase not configured). The live source of truth is
+ * public.role_permissions, enforced by has_permission() in RLS and returned to
+ * the app by get_my_permissions() -> User.permissions.
+ * Keep this copy identical to the seed in supabase/schema_complete.sql.
+ */
 const rolePermissions: Record<Exclude<User['role'], 'customer'>, Partial<Record<AdminModule, PermissionAction[]>>> = {
   super_admin: {
     dashboard: ['view'], products: ['view', 'create', 'edit', 'delete'], inventory: ['view', 'create', 'edit', 'manage'],
@@ -31,15 +38,16 @@ const rolePermissions: Record<Exclude<User['role'], 'customer'>, Partial<Record<
     customers: ['view', 'manage'], activity: ['view'], sales: ['view', 'manage'], insights: ['view'], recommendations: ['view'],
     reports: ['view', 'generate', 'export'], support: ['view', 'respond'],
   },
-  beauty_staff: { dashboard: ['view'], inventory: ['view', 'manage'], activity: ['view'] },
+  beauty_staff: { inventory: ['view', 'manage'], activity: ['view'] },
 };
 
 export function hasModulePermission(
-  user: Pick<User, 'role'> | null,
+  user: (Pick<User, 'role'> & { permissions?: Record<string, string[]> }) | null,
   module: AdminModule,
   action: PermissionAction = 'view',
 ): boolean {
   if (!user || user.role === 'customer') return false;
+  if (user.permissions) return (user.permissions[module] ?? []).includes(action);
   return rolePermissions[user.role][module]?.includes(action) || false;
 }
 

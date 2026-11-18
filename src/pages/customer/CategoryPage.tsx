@@ -9,13 +9,14 @@ import {
   Button,
   StarRating,
   Checkbox,
-  RangeSlider,
+  PriceSlider,
   Breadcrumb,
   LoadingState,
 } from "../../components/ui"
 import CustomerNav from "../../components/CustomerNav"
 import ProductModal from "../../components/ProductModal"
 import { safeImage } from "../../lib/image"
+import { resolveVariant } from "../../lib/variant"
 
 const sortOptions = [
   "Featured",
@@ -28,7 +29,7 @@ const sortOptions = [
 export default function CategoryPage() {
   const { id } = useParams<{ id: string }>()
   const [selectedBrands, setSelectedBrands] = useState<string[]>([])
-  const [priceRange, setPriceRange] = useState<[number, number]>([0, 0])
+  const [priceRange, setPriceRange] = useState(1000)
   const [inStockOnly, setInStockOnly] = useState(false)
   const [onSaleOnly, setOnSaleOnly] = useState(false)
   const [sort, setSort] = useState("Featured")
@@ -58,17 +59,8 @@ export default function CategoryPage() {
       .includes((id || "").replace("-care", ""))
   }
 
-  // Brands and the price range are scoped to this category so the slider always
-  // reflects the most expensive product actually shown here.
   const categoryProducts = products.filter(matchesCategory)
-  const maxPrice = categoryProducts.length
-    ? Math.ceil(Math.max(...categoryProducts.map((product) => product.price)))
-    : 0
   const brands = [...new Set(categoryProducts.map(product => product.brand).filter(Boolean))].sort()
-
-  useEffect(() => {
-    if (maxPrice > 0) setPriceRange([0, maxPrice])
-  }, [maxPrice])
 
   useEffect(() => {
     setPage(1)
@@ -89,7 +81,7 @@ export default function CategoryPage() {
   let filtered = categoryProducts.filter((p) => {
     const matchesBrand =
       selectedBrands.length === 0 || selectedBrands.includes(p.brand)
-    const matchesPrice = p.price >= priceRange[0] && p.price <= priceRange[1]
+    const matchesPrice = p.price <= priceRange
     const matchesAvailability = (!inStockOnly || p.inStock) && (!onSaleOnly || Boolean(p.originalPrice && p.originalPrice > p.price))
     return matchesBrand && matchesPrice && matchesAvailability
   })
@@ -126,13 +118,7 @@ export default function CategoryPage() {
         </div>
       </div>
       <div className="h-px bg-[var(--border)]" />
-      <RangeSlider
-        min={0}
-        max={maxPrice}
-        value={priceRange}
-        onChange={setPriceRange}
-        label="Price Range"
-      />
+      <PriceSlider value={priceRange} onChange={setPriceRange} />
       <div className="h-px bg-[var(--border)]" />
       <div>
         <h3 className="text-sm font-semibold mb-3">Availability</h3>
@@ -141,11 +127,11 @@ export default function CategoryPage() {
           <Checkbox checked={onSaleOnly} onChange={() => setOnSaleOnly(value => !value)} label="On Sale" />
         </div>
       </div>
-      {(selectedBrands.length > 0 || inStockOnly || onSaleOnly || priceRange[0] > 0 || priceRange[1] < maxPrice) && (
+      {(selectedBrands.length > 0 || inStockOnly || onSaleOnly || priceRange < 1000) && (
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => { setSelectedBrands([]); setInStockOnly(false); setOnSaleOnly(false); setPriceRange([0, maxPrice]) }}
+          onClick={() => { setSelectedBrands([]); setInStockOnly(false); setOnSaleOnly(false); setPriceRange(1000) }}
           
         >
           <X size={14} /> Clear Filters
@@ -236,7 +222,7 @@ export default function CategoryPage() {
                     setSelectedBrands([])
                     setInStockOnly(false)
                     setOnSaleOnly(false)
-                    setPriceRange([0, maxPrice])
+                    setPriceRange(1000)
                   }}
                 >
                   Clear all filters
@@ -257,7 +243,7 @@ export default function CategoryPage() {
                         setModalProduct(product)
                       }
                     }}
-                    className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg transition-all duration-300 cursor-pointer"
+                    className="group bg-white rounded-[var(--radius-xl)] border border-[var(--border)] overflow-hidden hover:shadow-lg hover:-translate-y-1 transition-all duration-300 cursor-pointer flex flex-col"
                   >
                     <div
                       role="button"
@@ -332,11 +318,11 @@ export default function CategoryPage() {
                       <div className="flex items-center justify-between mt-2">
                         <div>
                           <span className="text-sm font-bold">
-                            ₱{product.price.toFixed(2)}
+                            ₱{resolveVariant(product).price.toFixed(2)}
                           </span>
-                          {product.originalPrice && (
+                          {resolveVariant(product).originalPrice != null && (
                             <span className="text-[10px] text-[var(--muted-foreground)] line-through ml-1">
-                              ₱{product.originalPrice.toFixed(2)}
+                              ₱{resolveVariant(product).originalPrice!.toFixed(2)}
                             </span>
                           )}
                         </div>
@@ -348,14 +334,15 @@ export default function CategoryPage() {
                               id: product.id,
                               name: product.name,
                               brand: product.brand,
-                              price: product.price,
+                              price: resolveVariant(product).price,
                               image: product.image,
-                              stock: product.stock,
-                              inStock: product.inStock,
-                              variant: product.variantId,
+                              stock: resolveVariant(product).stock,
+                              inStock: product.inStock && resolveVariant(product).stock > 0,
+                              variantId: resolveVariant(product).variantId,
+                              variantLabel: resolveVariant(product).label,
                             })
                           }}
-                          disabled={!product.inStock}
+                          disabled={!product.inStock || resolveVariant(product).stock <= 0}
                           className="text-xs px-2.5 py-1"
                         >
                           Add

@@ -34,10 +34,12 @@ Deno.serve(async request => {
   if (authError || !authData.user) return response(401, { error: 'Authentication is invalid or expired.' });
 
   const actorId = authData.user.id;
+  // profiles is keyed by user_id (there is no profiles.id column), so every
+  // lookup below targets user_id and aliases it back to `id` for responses.
   const { data: actor, error: actorError } = await adminClient
     .from('profiles')
     .select('role, account_status')
-    .eq('id', actorId)
+    .eq('user_id', actorId)
     .maybeSingle();
   if (actorError) {
     console.error('manage-user actor profile lookup failed', {
@@ -61,36 +63,42 @@ Deno.serve(async request => {
 
   if (input.action === 'status') {
     if (actor?.role !== 'super_admin' && actor?.role !== 'beauty_admin') {
-      return response(403, { error: 'Beauty Administrator access is required to manage customer status.' });
+      return response(403, { error: 'Administrator access is required to change account status.' });
     }
     const id = typeof input.id === 'string' ? input.id : '';
     const status = input.status;
     if (!id || (status !== 'Active' && status !== 'Inactive')) {
-      return response(400, { error: 'A customer ID and valid account status are required.' });
+      return response(400, { error: 'A user ID and valid account status are required.' });
     }
+    if (id === actorId) return response(400, { error: 'You cannot change your own account status.' });
     const { data: target, error: targetError } = await adminClient
       .from('profiles')
-      .select('id, role, account_status, first_name, last_name, email')
-      .eq('id', id)
+      .select('id:user_id, role, account_status, first_name, last_name, email')
+      .eq('user_id', id)
       .maybeSingle();
-    if (targetError) return response(500, { error: 'Unable to load the customer account.' });
-    if (!target || target.role !== 'customer') return response(404, { error: 'Customer account not found.' });
+    if (targetError) return response(500, { error: `Unable to load the account (${targetError.message}).` });
+    if (!target) return response(404, { error: 'Account not found.' });
+    // Beauty administrators may archive/re-activate customers only; staff and
+    // administrator accounts require the super administrator.
+    if (target.role !== 'customer' && actor?.role !== 'super_admin') {
+      return response(403, { error: 'P&G Super Administrator access is required to change a staff account.' });
+    }
     if (target.account_status === status) return response(200, { user: target });
 
     const { data: updated, error: updateError } = await adminClient.from('profiles')
       .update({ account_status: status })
-      .eq('id', id)
-      .select('id, role, account_status, first_name, last_name, email')
+      .eq('user_id', id)
+      .select('id:user_id, role, account_status, first_name, last_name, email')
       .single();
     if (updateError) return response(400, { error: updateError.message });
 
     const { error: auditError } = await adminClient.from('user_activity_log').insert({
       actor_id: actorId,
-      action: 'customer.status_changed',
+      action: 'user.status_changed',
       details: { user_id: id, previous_status: target.account_status || 'Active', status },
     });
     if (auditError) {
-      const { error: rollbackError } = await adminClient.from('profiles').update({ account_status: target.account_status || 'Active' }).eq('id', id);
+      const { error: rollbackError } = await adminClient.from('profiles').update({ account_status: target.account_status || 'Active' }).eq('user_id', id);
       return response(500, { error: rollbackError ? `Status changed but audit logging and rollback failed: ${auditError.message}; ${rollbackError.message}` : `Status change was rolled back because audit logging failed: ${auditError.message}` });
     }
     return response(200, { user: updated });
@@ -115,8 +123,8 @@ Deno.serve(async request => {
     const { data: profile, error: profileError } = await adminClient
       .from('profiles')
       .update({ first_name: firstName, last_name: lastName, email, role })
-      .eq('id', invitation.user.id)
-      .select('id, first_name, last_name, email, role, created_at')
+      .eq('user_id', invitation.user.id)
+      .select('id:user_id, first_name, last_name, email, role, created_at')
       .single();
     if (profileError) {
       const { error: cleanupError } = await adminClient.auth.admin.deleteUser(invitation.user.id);
@@ -143,15 +151,15 @@ Deno.serve(async request => {
     }
     const { data: target, error: targetError } = await adminClient
       .from('profiles')
-      .select('id, role, first_name, last_name, email, created_at')
-      .eq('id', id)
+      .select('id:user_id, role, first_name, last_name, email, created_at')
+      .eq('user_id', id)
       .maybeSingle();
-    if (targetError) return response(500, { error: 'Unable to load the target user.' });
+    if (targetError) return response(500, { error: `Unable to load the target user (${targetError.message}).` });
     if (!target) return response(404, { error: 'User not found.' });
 
     if (target.role === 'super_admin' && role !== 'super_admin') {
       const { count, error: countError } = await adminClient.from('profiles')
-        .select('id', { count: 'exact', head: true })
+        .select('user_id', { count: 'exact', head: true })
         .eq('role', 'super_admin');
       if (countError) return response(500, { error: 'Unable to verify Super Administrator accounts.' });
       if ((count || 0) <= 1) return response(400, { error: 'The last Super Administrator cannot be demoted.' });
@@ -159,8 +167,8 @@ Deno.serve(async request => {
 
     const { data: updated, error: updateError } = await adminClient.from('profiles')
       .update({ role })
-      .eq('id', id)
-      .select('id, first_name, last_name, email, role, created_at')
+      .eq('user_id', id)
+      .select('id:user_id, first_name, last_name, email, role, created_at')
       .single();
     if (updateError) return response(400, { error: updateError.message });
 
@@ -170,7 +178,7 @@ Deno.serve(async request => {
       details: { user_id: id, previous_role: target.role, role },
     });
     if (auditError) {
-      const { error: rollbackError } = await adminClient.from('profiles').update({ role: target.role }).eq('id', id);
+      const { error: rollbackError } = await adminClient.from('profiles').update({ role: target.role }).eq('user_id', id);
       return response(500, { error: rollbackError ? `Role changed but audit logging and rollback failed: ${auditError.message}; ${rollbackError.message}` : `Role change was rolled back because audit logging failed: ${auditError.message}` });
     }
     return response(200, { user: updated });

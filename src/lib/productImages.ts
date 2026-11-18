@@ -1,6 +1,8 @@
 import { supabase } from './supabase';
 
 export const PRODUCT_IMAGE_BUCKET = 'product-images';
+export const PRODUCT_IMAGE_LIMIT = 8;
+export const VARIANT_IMAGE_LIMIT = 5;
 
 export interface UploadedProductImage {
   path: string;
@@ -54,16 +56,14 @@ export async function compressProductImage(file: File): Promise<Blob> {
   }
 }
 
-export async function uploadProductImages(productId: string, files: File[]): Promise<UploadedProductImage[]> {
+async function uploadSequence(files: File[], pathFor: (compressed: Blob) => string): Promise<UploadedProductImage[]> {
   const uploaded: UploadedProductImage[] = [];
   const storage = supabase.storage.from(PRODUCT_IMAGE_BUCKET);
 
   try {
     for (const file of files) {
       const compressed = await compressProductImage(file);
-      const extension = compressed.type === 'image/webp' ? 'webp' : 'jpg';
-      const path = `${productId}/${crypto.randomUUID()}.${extension}`;
-      const { data, error } = await storage.upload(path, compressed, {
+      const { data, error } = await storage.upload(pathFor(compressed), compressed, {
         cacheControl: '31536000',
         contentType: compressed.type,
         upsert: false,
@@ -87,6 +87,24 @@ export async function uploadProductImages(productId: string, files: File[]): Pro
     }
     throw error;
   }
+}
+
+const extensionFor = (compressed: Blob) => (compressed.type === 'image/webp' ? 'webp' : 'jpg');
+
+export async function uploadProductImages(productId: string, files: File[]): Promise<UploadedProductImage[]> {
+  if (files.length > PRODUCT_IMAGE_LIMIT) {
+    throw new Error(`A product can hold up to ${PRODUCT_IMAGE_LIMIT} images.`);
+  }
+  return uploadSequence(files, compressed => `${productId}/${crypto.randomUUID()}.${extensionFor(compressed)}`);
+}
+
+// Per-variant photos live under {productId}/variants/{variantId}/ so they can
+// be removed with the variant without touching the product's own gallery.
+export async function uploadVariantImages(productId: string, variantId: string, files: File[]): Promise<UploadedProductImage[]> {
+  if (files.length > VARIANT_IMAGE_LIMIT) {
+    throw new Error(`A variant can hold up to ${VARIANT_IMAGE_LIMIT} images.`);
+  }
+  return uploadSequence(files, compressed => `${productId}/variants/${variantId}/${crypto.randomUUID()}.${extensionFor(compressed)}`);
 }
 
 export async function removeProductImages(paths: string[]): Promise<void> {

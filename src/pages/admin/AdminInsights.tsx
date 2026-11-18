@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import AdminSidebar from '../../components/AdminSidebar';
-import { Badge, Button, LoadingState } from '../../components/ui';
+import { Badge, Button, LoadingState, useTableMetrics } from '../../components/ui';
 import { fetchCustomerInsights } from '../../lib/adminData';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import ProductModal from '../../components/ProductModal';
@@ -16,6 +16,12 @@ export default function AdminInsights() {
   const [error, setError] = useState('');
   const [modalProduct, setModalProduct] = useState<any>(null);
   const { products } = useCatalog();
+  const {
+    headRef: insightsHeadRef,
+    bodyRef: insightsBodyRef,
+    headH: insightsHead,
+    rowH: insightsRow,
+  } = useTableMetrics(data?.frequentProducts.length ?? 0);
 
   useEffect(() => {
     let active = true;
@@ -51,9 +57,9 @@ export default function AdminInsights() {
             {/* Frequently Interacted-With Products */}
             <section className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
               <h2 className="font-semibold text-sm mb-3">Frequently Interacted-With Products</h2>
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto" style={{ minHeight: insightsHead + insightsRow * 6 }}>
                 <table className="w-full text-sm">
-                  <thead>
+                  <thead ref={insightsHeadRef}>
                     <tr className="text-left text-xs text-[var(--muted-foreground)] border-b border-[var(--border)]">
                       <th className="py-2 pr-3">Product</th>
                       <th className="py-2 px-2">Interactions</th>
@@ -63,10 +69,10 @@ export default function AdminInsights() {
                       <th className="py-2 pl-2">Purchases</th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody ref={insightsBodyRef}>
                     {data.frequentProducts.slice(0, 6).map(item => (
                       <tr key={item.id} className="border-b border-[var(--border)] last:border-0">
-                        <td className="py-2 pr-3 font-medium">{item.product}</td>
+                        <td className="py-2 pr-3 font-medium whitespace-nowrap">{item.product}</td>
                         <td className="py-2 px-2">{item.interactions}</td>
                         <td className="py-2 px-2">{item.views}</td>
                         <td className="py-2 px-2">{item.cart}</td>
@@ -75,7 +81,7 @@ export default function AdminInsights() {
                       </tr>
                     ))}
                     {data.frequentProducts.length === 0 && (
-                      <tr><td colSpan={6} className="px-3 py-6 text-center text-xs text-[var(--muted-foreground)]">No customer interactions recorded yet.</td></tr>
+                      <tr><td colSpan={6} style={{ height: insightsRow * 6 }} className="px-3 text-center text-xs text-[var(--muted-foreground)]">No customer interactions recorded yet.</td></tr>
                     )}
                   </tbody>
                 </table>

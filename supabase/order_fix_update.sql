@@ -353,7 +353,7 @@ drop policy if exists own_user_payment_methods on public.user_payment_methods;
 create policy own_user_payment_methods on public.user_payment_methods for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 grant select, insert, update, delete on public.user_payment_methods to authenticated;
 grant execute on function public.record_inventory_movement(uuid, text, integer, text, text) to authenticated;
-grant select, insert, update, delete on public.suppliers, public.supplier_products, public.purchase_orders, public.purchase_order_items, public.orders, public.order_items, public.payments, public.inventory_movements to authenticated;
+grant select, insert, update, delete on public.suppliers, public.purchase_orders, public.purchase_order_items, public.orders, public.order_items, public.payments, public.inventory_movements to authenticated;
 
 grant execute on function public.place_order(
   uuid,

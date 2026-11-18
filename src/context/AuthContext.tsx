@@ -14,12 +14,14 @@ export interface User {
   initials: string;
   /** Beauty quiz answers saved to profiles.skin_profile; null until the quiz is taken. */
   skinProfile?: Record<string, unknown> | null;
+  /** Module permission map from get_my_permissions(); source of truth is the database. */
+  permissions?: Record<string, string[]>;
 }
 
 interface AuthCtx {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string, role?: string) => Promise<{ ok: boolean; error?: string }>;
+  login: (email: string, password: string, role?: string) => Promise<{ ok: boolean; error?: string; user?: User }>;
   register: (data: RegisterData) => Promise<{ ok: boolean; error?: string }>;
   socialLogin: (provider: 'Google' | 'Facebook') => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
@@ -106,6 +108,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) throw error;
     if (!data) throw new Error('Your account profile could not be loaded.');
     const dbUser = toUser(authUser, data);
+    if (dbUser.role !== 'customer') {
+      const { data: permissions, error: permissionsError } = await supabase.rpc('get_my_permissions');
+      if (!permissionsError && permissions && typeof permissions === 'object') {
+        dbUser.permissions = permissions as Record<string, string[]>;
+      }
+    }
     const nextUser = storedUser && storedUser.id === authUser.id
       ? {
           ...dbUser,
@@ -116,6 +124,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           phone: dbUser.phone || storedUser.phone,
           birthday: data ? dbUser.birthday : storedUser.birthday,
           initials: dbUser.initials || storedUser.initials,
+          permissions: dbUser.permissions ?? storedUser.permissions,
         }
       : dbUser;
 
@@ -211,7 +220,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       return { ok: false, error: 'Use the admin portal to sign in with this account.' };
     }
-    return { ok: true };
+    return { ok: true, user: signedInUser };
   };
 
   const register = async (data: RegisterData) => {
@@ -281,7 +290,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       initials: `${(nextFirstName || user.firstName || 'U')[0]}${(nextLastName || user.lastName || 'U')[0]}`.toUpperCase(),
     };
 
-    const nextUser = updated ? toUser({ id: user.id, email: user.email } as SupabaseUser, updated) : mergedUser;
+    const nextUser = updated
+      ? { ...toUser({ id: user.id, email: user.email } as SupabaseUser, updated), permissions: user.permissions }
+      : mergedUser;
     setUser(nextUser);
     persistUser(nextUser);
   };

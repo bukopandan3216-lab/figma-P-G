@@ -177,6 +177,26 @@ export interface Column<T> {
   render?: (row: T) => React.ReactNode;
   sortable?: boolean;
 }
+/**
+ * Measures a table's header and row heights so callers can pin the table box
+ * to a fixed number of rows (static layout regardless of result count).
+ * Returns refs for <thead>/<tbody> plus the last measured heights.
+ */
+export function useTableMetrics(rowCount: number) {
+  const headRef = useRef<HTMLTableSectionElement | null>(null);
+  const bodyRef = useRef<HTMLTableSectionElement | null>(null);
+  const [headH, setHeadH] = useState(33);
+  const [rowH, setRowH] = useState(41);
+  useEffect(() => {
+    const h = headRef.current?.getBoundingClientRect().height ?? 0;
+    if (h > 0) setHeadH(prev => Math.abs(prev - h) > 0.5 ? Math.ceil(h) : prev);
+    if (rowCount === 0) return;
+    const r = bodyRef.current?.querySelector('tr')?.getBoundingClientRect().height ?? 0;
+    if (r > 0) setRowH(prev => Math.abs(prev - r) > 0.5 ? Math.ceil(r) : prev);
+  }, [rowCount]);
+  return { headRef, bodyRef, headH, rowH };
+}
+
 export function DataTable<T extends Record<string, unknown>>({
   columns, data, emptyMessage = 'No records found',
 }: {
@@ -200,6 +220,8 @@ export function DataTable<T extends Record<string, unknown>>({
     : filtered;
   const pages = Math.max(1, Math.ceil(sorted.length / perPage));
   const rows = sorted.slice((page - 1) * perPage, page * perPage);
+  const { headRef, bodyRef, headH, rowH } = useTableMetrics(rows.length);
+  const bodyH = rowH * perPage;
 
   const toggleSort = (key: string) => {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -233,7 +255,6 @@ export function DataTable<T extends Record<string, unknown>>({
           record.variantLabel,
           record.variant,
           record.size,
-          record.scent,
           record.category,
           record.brand,
         ].find(value => value !== undefined && value !== null && value !== '');
@@ -271,9 +292,9 @@ export function DataTable<T extends Record<string, unknown>>({
           className="w-full pl-8 pr-3 py-2 text-sm border border-[var(--border)] rounded-[var(--radius)] bg-[var(--card)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
         />
       </div>
-      <div className="overflow-x-auto rounded-[var(--radius-lg)] border border-[var(--border)]">
+      <div className="overflow-x-auto rounded-[var(--radius-lg)] border border-[var(--border)]" style={{ minHeight: headH + bodyH }}>
         <table className="w-full text-sm">
-          <thead>
+          <thead ref={headRef}>
             <tr className="bg-[var(--secondary)] border-b border-[var(--border)]">
               {columns.map(col => (
                 <th
@@ -289,16 +310,19 @@ export function DataTable<T extends Record<string, unknown>>({
               ))}
             </tr>
           </thead>
-          <tbody>
+          <tbody ref={bodyRef}>
             {rows.length === 0 ? (
-              <tr><td colSpan={columns.length} className="px-4 py-12 text-center text-[var(--muted-foreground)]">{emptyMessage}</td></tr>
+              <tr><td colSpan={columns.length} style={{ height: bodyH }} className="px-4 text-center text-[var(--muted-foreground)]">{emptyMessage}</td></tr>
             ) : rows.map((row, i) => (
               <tr key={rowKeys[i]} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--secondary)] transition-colors">
-                {columns.map(col => (
-                  <td key={`${rowKeys[i]}-${String(col.key)}`} className="px-4 py-3 text-[var(--foreground)]">
-                    {col.render ? col.render(row) : String(row[col.key as keyof T] ?? '')}
-                  </td>
-                ))}
+                {columns.map(col => {
+                  const raw = col.render ? undefined : String(row[col.key as keyof T] ?? '');
+                  return (
+                    <td key={`${rowKeys[i]}-${String(col.key)}`} className="px-4 py-3 text-[var(--foreground)] whitespace-nowrap">
+                      <div className="max-w-[280px] truncate" title={raw}>{col.render ? col.render(row) : raw}</div>
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
@@ -500,6 +524,36 @@ export function RangeSlider({ min, max, value, onChange, label }: {
       <div className="flex justify-between text-xs text-[var(--muted-foreground)]">
         <span>₱{value[0].toLocaleString('en-PH')}</span>
         <span>₱{value[1].toLocaleString('en-PH')}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Single-thumb price slider. The default 0–1000 range covers the catalogue. */
+export function PriceSlider({ min = 0, max = 1000, step = 10, value, onChange, label = 'Price Range' }: {
+  min?: number; max?: number; step?: number; value: number; onChange: (v: number) => void; label?: string;
+}) {
+  const percent = Math.min(100, Math.max(0, ((value - min) / Math.max(1, max - min)) * 100));
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-medium">{label}</label>
+        <span className="text-xs font-medium text-[var(--primary)]">Up to ₱{value.toLocaleString('en-PH')}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-label={label}
+        onChange={event => onChange(Number(event.target.value))}
+        style={{ background: `linear-gradient(to right, var(--primary) 0%, var(--primary) ${percent}%, var(--muted) ${percent}%, var(--muted) 100%)` }}
+        className="h-2 w-full cursor-pointer appearance-none rounded-full outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-[var(--ring)] [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:cursor-grab [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-[var(--primary)] [&::-moz-range-thumb]:bg-white [&::-moz-range-thumb]:shadow [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:cursor-grab [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-[var(--primary)] [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow"
+      />
+      <div className="flex justify-between text-xs text-[var(--muted-foreground)]">
+        <span>₱{min.toLocaleString('en-PH')}</span>
+        <span>₱{max.toLocaleString('en-PH')}</span>
       </div>
     </div>
   );

@@ -45,7 +45,7 @@ interface ChatBubbleProps {
 
 function getAIResponse(text: string, products: any[]): string {
   const lower = text.toLowerCase();
-  const keywords = ['dry', 'oily', 'sensitive', 'acne', 'aging', 'wrinkle', 'hair', 'shampoo', 'conditioner', 'toothpaste', 'deodorant', 'soap', 'lotion', 'cream', 'serum', 'cleanser', 'moisturizer', 'sunscreen', 'lipstick', 'makeup'];
+  const keywords = ['dry', 'oily', 'sensitive', 'acne', 'aging', 'wrinkle', 'hair', 'shampoo', 'conditioner', 'deodorant', 'soap', 'lotion', 'cream', 'serum', 'cleanser', 'moisturizer', 'sunscreen', 'lipstick', 'makeup'];
   const matched = keywords.filter(k => lower.includes(k));
 
   let relevant = products;

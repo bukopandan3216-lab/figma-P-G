@@ -12,6 +12,7 @@ import CustomerNav from '../../components/CustomerNav';
 import { useToast, ToastContainer } from '../../components/ui';
 import { isSupabaseConfigured, supabase } from '../../lib/supabase';
 import { safeImage } from '../../lib/image';
+import { resolveVariant } from '../../lib/variant';
 
 // ─── Login Page ───────────────────────────────────────────────────────────────
 export function LoginPage() {
@@ -551,7 +552,7 @@ function WishlistSection() {
       <h2 className="font-semibold mb-5">Wishlist <span className="text-[var(--muted-foreground)] font-normal text-sm">({wishedProducts.length})</span></h2>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
         {wishedProducts.map(p => (
-          <div key={p.id} className="group border border-[var(--border)] rounded-[var(--radius-lg)] overflow-hidden hover:shadow-md transition-shadow">
+          <div key={p.id} className="group border border-[var(--border)] rounded-[var(--radius-lg)] overflow-hidden transition-all duration-300 hover:-translate-y-1 hover:shadow-md">
             <div className="relative aspect-square bg-[var(--secondary)] overflow-hidden">
               <img src={safeImage(p.image, p.name)} alt={p.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
               <button onClick={() => toggleWishlist(p.id)} className="absolute top-2 right-2 w-7 h-7 rounded-full bg-white/90 flex items-center justify-center shadow-sm">
@@ -562,8 +563,8 @@ function WishlistSection() {
               <div className="text-[10px] text-[var(--muted-foreground)] mb-0.5">{p.brand}</div>
               <div className="text-sm font-semibold line-clamp-2 mb-2 leading-snug">{p.name}</div>
               <div className="flex items-center justify-between">
-                <span className="font-bold text-sm">₱{p.price.toFixed(2)}</span>
-                <Button size="sm" onClick={() => addToCart({ id: p.id, name: p.name, brand: p.brand, price: p.price, image: p.image, stock: p.stock, inStock: p.inStock })} disabled={!p.inStock} className="text-xs">Add</Button>
+                <span className="font-bold text-sm">₱{resolveVariant(p).price.toFixed(2)}</span>
+                <Button size="sm" onClick={() => addToCart({ id: p.id, name: p.name, brand: p.brand, price: resolveVariant(p).price, image: p.image, stock: resolveVariant(p).stock, inStock: p.inStock && resolveVariant(p).stock > 0, variantId: resolveVariant(p).variantId, variantLabel: resolveVariant(p).label })} disabled={!p.inStock || resolveVariant(p).stock <= 0} className="text-xs">Add</Button>
               </div>
             </div>
           </div>

@@ -1,7 +1,9 @@
--- Additive, repeatable demo data for the analytics dashboard.
--- Run after schema.sql, compatibility/RBAC scripts, seed.sql, and seed_1000.sql.
--- This project stores customers in Auth-backed profiles, not a standalone users table.
--- Existing customer profiles are used; staff/admin profiles are used only if there are no customers.
+-- Additive, repeatable demo data for the analytics dashboard (1,500 orders).
+--
+-- Run AFTER supabase/seeds/seed.sql. Customers live in Auth-backed profiles, so
+-- this file never creates or modifies Auth accounts: it reuses existing customer
+-- profiles, falling back to staff/admin profiles only when there are no
+-- customers. Every insert is guarded, so it is safe to re-run.
 
 begin;
 
@@ -10,55 +12,54 @@ begin
   if not exists (
     select 1
     from public.profiles
-    where role = 'customer'
-       or role in ('super_admin', 'beauty_admin', 'beauty_staff')
+    where role in ('customer', 'super_admin', 'beauty_admin', 'beauty_staff')
   ) then
-    raise exception 'Dashboard seed requires at least one customer or staff profile.';
+    raise exception 'Demo analytics seed requires at least one customer or staff profile.';
   end if;
 
   if not exists (
     select 1
     from public.products p
-    join public.product_variants v on v.product_id = p.id
+    join public.product_variants v on v.product_id = p.product_id
     where p.status = 'Active'
   ) then
-    raise exception 'Dashboard seed requires active products with variants.';
+    raise exception 'Demo analytics seed requires active products with variants.';
   end if;
 end;
 $$;
 
-create temporary table dashboard_seed_rows on commit drop as
+create temporary table demo_analytics_rows on commit drop as
 with profile_candidates as (
-  select id, first_name, last_name, email
+  select user_id, first_name, last_name, email
   from public.profiles
   where role = 'customer'
 
   union all
 
-  select id, first_name, last_name, email
+  select user_id, first_name, last_name, email
   from public.profiles
   where role in ('super_admin', 'beauty_admin', 'beauty_staff')
     and not exists (select 1 from public.profiles where role = 'customer')
 ),
 numbered_profiles as (
   select
-    id,
+    user_id,
     first_name,
     last_name,
     email,
-    row_number() over (order by id) as row_num,
+    row_number() over (order by user_id) as row_num,
     count(*) over () as row_count
   from profile_candidates
 ),
 numbered_variants as (
   select
-    p.id as product_id,
-    v.id as variant_id,
+    p.product_id,
+    v.variant_id,
     p.price + v.additional_price as unit_price,
-    row_number() over (order by p.id, v.sku) as row_num,
+    row_number() over (order by p.product_id, v.sku) as row_num,
     count(*) over () as row_count
   from public.products p
-  join public.product_variants v on v.product_id = p.id
+  join public.product_variants v on v.product_id = p.product_id
   where p.status = 'Active'
 ),
 sequence as (
@@ -72,7 +73,7 @@ sequence as (
 )
 select
   'DEMO-ANALYTICS-' || lpad(sequence.n::text, 6, '0') as order_no,
-  profiles.id as user_id,
+  profiles.user_id,
   variants.product_id,
   variants.variant_id,
   variants.unit_price,
@@ -139,25 +140,25 @@ select
   'Philippines',
   created_at,
   order_no
-from dashboard_seed_rows
+from demo_analytics_rows
 on conflict (order_no) do nothing;
 
 insert into public.order_items (order_id, variant_id, quantity, price_at_purchase)
-select orders.id, seed.variant_id, seed.quantity, seed.unit_price
-from dashboard_seed_rows seed
+select orders.order_id, seed.variant_id, seed.quantity, seed.unit_price
+from demo_analytics_rows seed
 join public.orders orders on orders.order_no = seed.order_no
 where not exists (
-  select 1 from public.order_items items where items.order_id = orders.id
+  select 1 from public.order_items items where items.order_id = orders.order_id
 );
 
 insert into public.payments (order_id, provider, status, amount)
-select orders.id, 'Dashboard demo seed', seed.payment_status, orders.total_amount
-from dashboard_seed_rows seed
+select orders.order_id, 'Dashboard demo seed', seed.payment_status, orders.total_amount
+from demo_analytics_rows seed
 join public.orders orders on orders.order_no = seed.order_no
 where not exists (
   select 1
   from public.payments payments
-  where payments.order_id = orders.id
+  where payments.order_id = orders.order_id
     and payments.provider = 'Dashboard demo seed'
 );
 

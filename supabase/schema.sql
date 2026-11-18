@@ -1,3 +1,8 @@
+-- LEGACY SCHEMA - DO NOT RUN ON CURRENT INSTALLS.
+-- Use supabase/schema/idempotent/schema_complete.sql (or the split fresh/upgrade
+-- scripts). This file predates brand-owned supplier catalogues and still mentions
+-- the removed supplier_products table.
+
 
 create extension if not exists pgcrypto;
 create table if not exists public.profiles (

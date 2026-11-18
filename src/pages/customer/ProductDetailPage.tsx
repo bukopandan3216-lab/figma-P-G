@@ -11,6 +11,7 @@ import { safeImage } from '../../lib/image';
 import { supabase } from '../../lib/supabase';
 import { recordCustomerInteraction } from '../../lib/recommendations';
 import { FREE_SHIPPING_THRESHOLD } from '../../lib/catalog';
+import { defaultVariantSelection, isVariantOptionAvailable, resolveVariant } from '../../lib/variant';
 
 type DbReview = {
   id: string;
@@ -50,9 +51,9 @@ export default function ProductDetailPage() {
     setReviewsLoading(true);
     (async () => {
       try {
-        // Reviewer names come from the public review_authors view (name only).
-        // Embedding profiles() is blocked for guests and filtered out for other
-        // customers, and it would expose reviewer emails.
+        // Reviewer names come from a product-scoped RPC that exposes only the
+        // display-name columns. Embedding profiles() is blocked for guests and
+        // filtered out for other customers, and it would expose reviewer emails.
         const [{ data, error }, authors] = await Promise.all([
           supabase
             .from('product_reviews')
@@ -60,7 +61,7 @@ export default function ProductDetailPage() {
             .eq('product_id', id)
             .order('created_at', { ascending: false })
             .limit(20),
-          supabase.from('review_authors').select('user_id, first_name, last_name'),
+          supabase.rpc('get_product_review_authors', { p_product_id: id }),
         ]);
         if (!active) return;
         if (error) throw error;
@@ -84,15 +85,30 @@ export default function ProductDetailPage() {
     return () => { active = false; };
   }, [id]);
 
+  // The gallery follows the selector's effective choice: an explicit pick for
+  // a group, otherwise that group's first option (the auto-selected default).
+  const effectiveVariantLabel = product ? resolveVariant(product, selectedVariants).label || '' : '';
+  useEffect(() => { setActiveImg(0); }, [effectiveVariantLabel]);
+
   if (loading) return <LoadingState fullScreen message="Hang tight, loading product details…" />;
   if (error || !product) return <div className="min-h-screen bg-background flex items-center justify-center p-6 text-center"><p className="text-sm text-[var(--muted-foreground)]">{error || 'Product not found.'}</p></div>;
   const wished = wishlist.includes(product.id);
-  // products.images defaults to '{}' (an empty array) in the DB, not null —
-  // and [] is truthy in JS, so `product.images || [product.image]` never
-  // fell back to the single image and rendered no src at all.
-  const imgs = (product.images?.length ? product.images.filter(Boolean) : [product.image]).filter(Boolean);
+  // When the selected variant has its own photos they replace the product
+  // gallery; otherwise the product's own photos are shown. product.images
+  // defaults to '{}' (empty array, truthy in JS) rather than null, hence the
+  // explicit length checks.
+  const variantPhotos = (effectiveVariantLabel ? product.variantImages?.[effectiveVariantLabel] : undefined) || [];
+  const imgs = (variantPhotos.length ? variantPhotos : product.images?.length ? product.images.filter(Boolean) : [product.image]).filter(Boolean);
   const safeImgs = imgs.length ? imgs.map(img => safeImage(img, product.name)) : [safeImage(product.image, product.name)];
   const relatedProducts = products.filter(p => p.category === product.category && p.id !== product.id).slice(0, 4);
+  // Price, stock and the variant id all follow the shopper's selection, so the
+  // cart line stores the SKU actually chosen and the price it was shown at.
+  const defaultSelection = defaultVariantSelection(product);
+  const selectedVariant = resolveVariant(product, selectedVariants);
+  const variantStock = selectedVariant.stock;
+  const canBuy = product.inStock && selectedVariant.valid && variantStock > 0;
+  const variantOriginalPrice = selectedVariant.originalPrice;
+  const savings = variantOriginalPrice != null ? variantOriginalPrice - selectedVariant.price : 0;
 
   return (
     <div className="min-h-screen bg-background">
@@ -134,19 +150,19 @@ export default function ProductDetailPage() {
             </div>
 
             <div className="flex items-center gap-3 mb-6">
-              <span className="text-3xl font-bold">₱{product.price.toFixed(2)}</span>
-              {product.originalPrice && (
+              <span className="text-3xl font-bold">₱{selectedVariant.price.toFixed(2)}</span>
+              {variantOriginalPrice != null && (
                 <>
-                  <span className="text-lg text-[var(--muted-foreground)] line-through">₱{product.originalPrice.toFixed(2)}</span>
-                  <Badge variant="danger">Save ₱{(product.originalPrice - product.price).toFixed(2)}</Badge>
+                  <span className="text-lg text-[var(--muted-foreground)] line-through">₱{variantOriginalPrice.toFixed(2)}</span>
+                  {savings > 0 && <Badge variant="danger">Save ₱{savings.toFixed(2)}</Badge>}
                 </>
               )}
             </div>
 
             {/* Stock status */}
-            <div className={`flex items-center gap-2 mb-5 text-sm ${product.inStock ? product.stock < 10 ? 'text-amber-600' : 'text-emerald-600' : 'text-red-600'}`}>
-              {product.inStock ? (
-                <><Check size={14} /> {product.stock < 10 ? `Only ${product.stock} left in stock!` : 'In Stock'}</>
+            <div className={`flex items-center gap-2 mb-5 text-sm ${canBuy ? variantStock < 10 ? 'text-amber-600' : 'text-emerald-600' : 'text-red-600'}`}>
+              {canBuy ? (
+                <><Check size={14} /> {variantStock < 10 ? `Only ${variantStock} left in stock!` : 'In Stock'}</>
               ) : (
                 <><span className="w-2 h-2 rounded-full bg-red-500 inline-block" /> Out of Stock</>
               )}
@@ -155,17 +171,23 @@ export default function ProductDetailPage() {
             {/* Variants */}
             {product.variants?.map(variant => (
               <div key={variant.label} className="mb-5">
-                <div className="text-sm font-semibold mb-2">{variant.label}: <span className="font-normal text-[var(--muted-foreground)]">{selectedVariants[variant.label] || variant.options[0]}</span></div>
+                <div className="text-sm font-semibold mb-2">{variant.label}: <span className="font-normal text-[var(--muted-foreground)]">{selectedVariants[variant.label] || defaultSelection[variant.label] || variant.options[0]}</span></div>
                 <div className="flex flex-wrap gap-2">
-                  {variant.options.map(opt => (
-                    <button
-                      key={opt}
-                      onClick={() => setSelectedVariants(prev => ({ ...prev, [variant.label]: opt }))}
-                      className={`px-4 py-1.5 rounded-full text-sm border-2 transition-all ${(selectedVariants[variant.label] || variant.options[0]) === opt ? 'border-[var(--primary)] text-[var(--primary)] font-medium' : 'border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--muted-foreground)]'}`}
-                    >
-                      {opt}
-                    </button>
-                  ))}
+                  {variant.options.map(opt => {
+                    const available = isVariantOptionAvailable(product, selectedVariants, variant.label, opt);
+                    const active = (selectedVariants[variant.label] || defaultSelection[variant.label] || variant.options[0]) === opt;
+                    return (
+                      <button
+                        key={opt}
+                        onClick={() => setSelectedVariants(prev => ({ ...prev, [variant.label]: opt }))}
+                        disabled={!available}
+                        title={available ? undefined : 'This combination is not available'}
+                        className={`px-4 py-1.5 rounded-full text-sm border-2 transition-all ${active ? 'border-[var(--primary)] text-[var(--primary)] font-medium' : available ? 'border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--muted-foreground)]' : 'border-[var(--border)] text-[var(--muted-foreground)] opacity-40 line-through cursor-not-allowed'}`}
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             ))}
@@ -180,9 +202,9 @@ export default function ProductDetailPage() {
               <Button
                 size="lg"
                 className="flex-1"
-                disabled={!product.inStock || qty > product.stock}
+                disabled={!canBuy || qty > variantStock}
                 onClick={() => {
-                  for (let i = 0; i < qty; i++) addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock });
+                  for (let i = 0; i < qty; i++) addToCart({ id: product.id, name: product.name, brand: product.brand, price: selectedVariant.price, image: product.image, stock: variantStock, inStock: canBuy, variantId: selectedVariant.variantId, variantLabel: selectedVariant.label });
                 }}
               >
                 <ShoppingBag size={16} /> Add to Cart
@@ -314,10 +336,10 @@ export default function ProductDetailPage() {
       {/* Sticky ATC bar (mobile) */}
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-[var(--border)] p-4 flex items-center gap-3 md:hidden z-30">
         <div className="flex-1 min-w-0">
-          <div className="text-xs text-[var(--muted-foreground)] truncate">{product.name}</div>
-          <div className="font-bold">₱{product.price.toFixed(2)}</div>
+          <div className="text-xs text-[var(--muted-foreground)] truncate">{product.name}{selectedVariant.label ? ` · ${selectedVariant.label}` : ''}</div>
+          <div className="font-bold">₱{selectedVariant.price.toFixed(2)}</div>
         </div>
-        <Button disabled={!product.inStock || product.stock <= 0} onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })}>
+        <Button disabled={!canBuy} onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: selectedVariant.price, image: product.image, stock: variantStock, inStock: canBuy, variantId: selectedVariant.variantId, variantLabel: selectedVariant.label })}>
           <ShoppingBag size={15} /> Add to Cart
         </Button>
       </div>

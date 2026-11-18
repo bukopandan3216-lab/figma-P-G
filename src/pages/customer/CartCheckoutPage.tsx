@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Trash2, ShoppingBag, Check, CreditCard, MapPin, Package } from 'lucide-react';
 import { useCart } from '../../context/AppContext';
+import { useCatalog } from '../../context/CatalogContext';
 import { Button, Input, Stepper, Breadcrumb } from '../../components/ui';
 import CustomerNav from '../../components/CustomerNav';
 import { useAuth } from '../../context/AuthContext';
@@ -61,7 +62,8 @@ function readStoredPaymentMethods(): SavedPaymentMethod[] {
 export default function CartCheckoutPage() {
   const [view, setView] = useState<'cart' | 'checkout'>('cart');
   const [step, setStep] = useState(0);
-  const { cart, removeFromCart, updateQty, cartTotal, cartCount } = useCart();
+  const { cart, clearCart, removeFromCart, updateQty, cartTotal, cartCount } = useCart();
+  const { products, loading: catalogLoading } = useCatalog();
   const { user } = useAuth();
 
   const [shipping, setShipping] = useState({ name: '', email: '', phone: '', address: '', city: '', zip: '', country: 'Philippines' });
@@ -73,6 +75,25 @@ export default function CartCheckoutPage() {
   const shippingFee = cartTotal >= FREE_SHIPPING_THRESHOLD ? 0 : SHIPPING_FEE;
   const tax = cartTotal * VAT_RATE;
   const grandTotal = cartTotal + shippingFee + tax;
+
+  // A cart built before a variant expired/was archived still points at the old
+  // SKU. Validate every line against the live catalog (which already hides
+  // near-expiry and expired variants) and block checkout until it is removed.
+  const cartIssues = !catalogLoading && products.length
+    ? cart.flatMap(item => {
+        const product = products.find(candidate => candidate.id === item.id);
+        const option = product?.variantOptions?.find(candidate => candidate.id === item.variantId);
+        if (!item.variantId) return [{ key: item.key, message: `${item.name}: choose a variant again.` }];
+        if (!product || !option) return [{ key: item.key, message: `${item.name}: this variant is no longer available.` }];
+        if (option.expiryStatus === 'Expired' || option.expiryStatus === 'Near Expiry') {
+          return [{ key: item.key, message: `${item.name}: ${option.label} is expired or near expiry.` }];
+        }
+        if (option.stock < item.qty) {
+          return [{ key: item.key, message: `${item.name}: only ${option.stock} left in stock.` }];
+        }
+        return [];
+      })
+    : [];
 
   useEffect(() => {
     const savedAddresses = readStoredAddresses();
@@ -104,6 +125,10 @@ export default function CartCheckoutPage() {
 
   const placeOrder = async () => {
     if (!user || cart.length === 0) return;
+    if (cartIssues.length > 0) {
+      setError('Remove or fix the flagged cart items before placing the order.');
+      return;
+    }
     if (!shipping.name || !shipping.email || !shipping.address || !shipping.city || !shipping.zip) {
       setError('Complete your shipping information before continuing.');
       return;
@@ -116,11 +141,13 @@ export default function CartCheckoutPage() {
     try {
       const order = await createOrder({
         customerId: user.id,
-        items: cart.map(item => ({ productId: item.id, quantity: item.qty, unitPrice: item.price, variant: item.variant })),
+        items: cart.map(item => ({ productId: item.id, quantity: item.qty, unitPrice: item.price, variant: item.variantId })),
         shipping,
         paymentMethod,
       });
-      cart.forEach(item => removeFromCart(item.id));
+      // The order went through: empty the cart (place_order also clears the
+      // server-side cart rows for this customer).
+      clearCart();
       setOrderNumber(order.order_number || order.order_no || 'N/A');
       setStep(2);
     } catch (cause) {
@@ -136,6 +163,19 @@ export default function CartCheckoutPage() {
       <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
         <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Cart' }]} />
         <h1 className="font-display text-3xl mt-4 mb-8">Shopping Cart</h1>
+        {cartIssues.length > 0 && (
+          <div className="mb-6 rounded-[var(--radius-lg)] border border-amber-300 bg-amber-50 p-4">
+            <p className="text-sm font-semibold text-amber-900 mb-2">Some items can't be checked out</p>
+            <ul className="flex flex-col gap-2">
+              {cartIssues.map(issue => (
+                <li key={issue.key} className="flex items-center justify-between gap-3 text-xs text-amber-900">
+                  <span>{issue.message}</span>
+                  <button onClick={() => removeFromCart(issue.key)} className="font-semibold underline flex-shrink-0">Remove</button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {cart.length === 0 ? (
           <div className="text-center py-20">
             <ShoppingBag size={56} className="mx-auto text-[var(--muted-foreground)] opacity-30 mb-4" />
@@ -147,21 +187,21 @@ export default function CartCheckoutPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 flex flex-col gap-3">
               {cart.map(item => (
-                <div key={item.id} className="flex items-center gap-4 bg-white p-4 rounded-[var(--radius-xl)] border border-[var(--border)]">
+                <div key={item.key} className="flex items-center gap-4 bg-white p-4 rounded-[var(--radius-xl)] border border-[var(--border)]">
                   <img src={safeImage(item.image, item.name)} alt={item.name} className="w-20 h-20 object-cover rounded-[var(--radius-lg)] bg-[var(--secondary)] flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="text-xs text-[var(--muted-foreground)] mb-0.5">{item.brand}</div>
                     <div className="text-sm font-semibold line-clamp-2">{item.name}</div>
-                    {item.variant && <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{item.variant}</div>}
+                    {item.variantLabel && <div className="text-xs text-[var(--muted-foreground)] mt-0.5">{item.variantLabel}</div>}
                     <div className="flex items-center justify-between mt-3">
                       <div className="flex items-center border border-[var(--border)] rounded-[var(--radius)] overflow-hidden">
-                        <button onClick={() => updateQty(item.id, item.qty - 1)} className="w-7 h-7 flex items-center justify-center hover:bg-[var(--secondary)] text-sm font-medium">−</button>
+                        <button onClick={() => updateQty(item.key, item.qty - 1)} className="w-7 h-7 flex items-center justify-center hover:bg-[var(--secondary)] text-sm font-medium">−</button>
                         <span className="w-8 text-center text-sm">{item.qty}</span>
-                        <button onClick={() => updateQty(item.id, item.qty + 1)} className="w-7 h-7 flex items-center justify-center hover:bg-[var(--secondary)] text-sm font-medium">+</button>
+                        <button onClick={() => updateQty(item.key, item.qty + 1)} className="w-7 h-7 flex items-center justify-center hover:bg-[var(--secondary)] text-sm font-medium">+</button>
                       </div>
                       <div className="flex items-center gap-3">
                         <span className="font-bold">{peso(item.price * item.qty)}</span>
-                        <button onClick={() => removeFromCart(item.id)} className="text-[var(--muted-foreground)] hover:text-red-500 transition-colors"><Trash2 size={15} /></button>
+                        <button onClick={() => removeFromCart(item.key)} className="text-[var(--muted-foreground)] hover:text-red-500 transition-colors"><Trash2 size={15} /></button>
                       </div>
                     </div>
                   </div>
@@ -179,7 +219,7 @@ export default function CartCheckoutPage() {
                 <div className="flex justify-between font-bold text-base"><span>Total</span><span>{peso(grandTotal)}</span></div>
               </div>
               {shippingFee > 0 && <p className="text-xs text-[var(--muted-foreground)] mb-3">Add {peso(FREE_SHIPPING_THRESHOLD - cartTotal)} more for free shipping!</p>}
-              <Button className="w-full" size="lg" onClick={() => setView('checkout')}>Proceed to Checkout</Button>
+              <Button className="w-full" size="lg" disabled={cartIssues.length > 0} onClick={() => setView('checkout')}>Proceed to Checkout</Button>
               <div className="mt-3 flex items-center justify-center gap-2 text-xs text-[var(--muted-foreground)]">
                 <CreditCard size={12} /> Secure checkout
               </div>
@@ -235,7 +275,7 @@ export default function CartCheckoutPage() {
                   </>}
                   <div className="flex gap-3">
                     <Button variant="outline" onClick={() => setStep(0)}>Back</Button>
-                    <Button className="flex-1" onClick={placeOrder} loading={submitting}>Place Order</Button>
+                    <Button className="flex-1" onClick={placeOrder} loading={submitting} disabled={cartIssues.length > 0}>Place Order</Button>
                   </div>
                 </div>
               </div>

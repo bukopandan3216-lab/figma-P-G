@@ -11,11 +11,15 @@ import CustomerNav from '../../components/CustomerNav';
 import CustomerFooter from '../../components/CustomerFooter';
 import ProductModal from '../../components/ProductModal';
 import { safeImage } from '../../lib/image';
+import { resolveVariant } from '../../lib/variant';
 
 function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Product) => void }) {
   const { addToCart, toggleWishlist, wishlist } = useCart();
   const wished = wishlist.includes(product.id);
-  const displayPrice = product.price;
+  // Cards sell the first sellable variant; the detail page lets the shopper
+  // pick another one.
+  const selectedVariant = resolveVariant(product);
+  const displayPrice = selectedVariant.price;
   const hasReviews = product.reviews > 0;
 
   return (
@@ -53,7 +57,7 @@ function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Pr
           <button onClick={() => onExpand(product)} className="w-full text-left text-sm font-semibold leading-snug text-foreground transition-colors hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--primary)] line-clamp-2">{product.name}</button>
         </div>
         <div className="mt-4 flex items-center justify-between border-t border-[var(--border)] pt-3">
-          <span className="text-sm font-bold text-foreground">₱{displayPrice.toFixed(2)}{product.originalPrice != null && <span className="ml-2 text-xs font-normal text-muted-foreground line-through">₱{product.originalPrice.toFixed(2)}</span>}</span>
+          <span className="text-sm font-bold text-foreground">₱{displayPrice.toFixed(2)}{selectedVariant.originalPrice != null && <span className="ml-2 text-xs font-normal text-muted-foreground line-through">₱{selectedVariant.originalPrice.toFixed(2)}</span>}</span>
           {hasReviews && (
             <div className="flex items-center gap-1 text-xs font-medium text-[var(--foreground)]/75">
               <StarRating rating={product.rating} />
@@ -61,7 +65,7 @@ function ProductCard({ product, onExpand }: { product: Product; onExpand: (p: Pr
             </div>
           )}
         </div>
-        <Button size="sm" className="mt-3 w-full" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: displayPrice, image: product.image, stock: product.stock, inStock: product.inStock })} disabled={!product.inStock}>Add</Button>
+        <Button size="sm" className="mt-3 w-full" onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: displayPrice, image: product.image, stock: selectedVariant.stock, inStock: product.inStock && selectedVariant.stock > 0, variantId: selectedVariant.variantId, variantLabel: selectedVariant.label })} disabled={!product.inStock || selectedVariant.stock <= 0}>Add</Button>
       </div>
     </article>
   );

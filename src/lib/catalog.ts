@@ -1,5 +1,27 @@
 import { supabase } from './supabase';
 import type { Product } from '../data/products';
+import { isSellableVariant, expiryStatus } from './expiry';
+
+// ─── Supplier pricing (the ONE place the markup lives) ───────────────────────
+// SUPPLIER_MARKUP_PERCENT is the only definition of the markup anywhere in the
+// app. Shop prices are never derived from it — customers always pay the price
+// stored on the product — so changing this number changes NOTHING a customer
+// sees. It only decides the hidden supplier cost written on variants saved
+// after the change:
+//
+//     hidden cost = full app listing price / (1 + SUPPLIER_MARKUP_PERCENT / 100)
+//
+// To recompute costs for variants that already exist, run the backfill SQL
+// documented in supabase/schema_complete.sql (search: "backfill supplier_price").
+// The cost is never typed or displayed in the UI (purchase orders show only
+// the grand total); the database uses it as purchase_order_items.unit_cost.
+export const SUPPLIER_MARKUP_PERCENT = 30;
+
+/** Hidden supplier cost for a variant, derived from the price the app lists it at. */
+export function supplierCostFromListing(listingPrice: number): number {
+  return Math.round((Number(listingPrice) / (1 + SUPPLIER_MARKUP_PERCENT / 100)) * 100) / 100;
+}
+
 
 export interface CatalogCategory {
   id: string;
@@ -32,7 +54,7 @@ type ProductRow = {
   variants?: { label: string; options: string[] }[];
   brands?: { name: string } | null;
   categories?: { name: string; description: string; image: string } | null;
-  product_variants?: { id: string; label?: string; options?: string[]; size?: string; scent?: string; inventory?: { stock_quantity: number } | { stock_quantity: number }[] | null }[];
+  product_variants?: { id: string; label?: string; options?: string[]; size?: string; additional_price?: number; expiry_date?: string | null; images?: string[] | null; inventory?: { stock_quantity: number } | { stock_quantity: number }[] | null }[];
   inventory?: { stock_quantity: number } | { stock_quantity: number }[] | null;
 };
 
@@ -47,29 +69,26 @@ function toMany<T>(value: T | T[] | null | undefined): T[] {
 // entry, so two variants meant two entries with the identical 'Size' label
 // (React key collision). Group by kind and collect every distinct option.
 function buildVariantGroups(
-  variants?: { size?: string; scent?: string }[],
+  variants?: { size?: string }[],
 ): { label: string; options: string[] }[] | undefined {
   if (!variants?.length) return undefined;
   const sizes = [...new Set(variants.map(v => v.size).filter(Boolean))] as string[];
-  const scents = [...new Set(variants.map(v => v.scent).filter(Boolean))] as string[];
   const groups: { label: string; options: string[] }[] = [];
   if (sizes.length) groups.push({ label: 'Size', options: sizes });
-  if (scents.length) groups.push({ label: 'Scent', options: scents });
   return groups.length ? groups : undefined;
 }
 
 export async function fetchProducts(): Promise<Product[]> {
   const { data, error } = await supabase
     .from('products')
-    .select('id:product_id, name, description, price, original_price, sale_price, discount_type, discount_value, discount_start, discount_end, rating, reviews, image, images, tags, badge, status, created_at, brands(name), categories(name), product_variants(id:variant_id, size, scent, inventory(stock_quantity))')
+    .select('id:product_id, name, description, price, original_price, sale_price, discount_type, discount_value, discount_start, discount_end, rating, reviews, image, images, tags, badge, status, created_at, brands(name), categories(name), product_variants(id:variant_id, size, additional_price, expiry_date, images, inventory(stock_quantity))')
     .order('created_at', { ascending: false });
   if (error) throw error;
 
-  return ((data || []) as unknown as ProductRow[]).map(row => {
+  const products: Product[] = [];
+  for (const row of (data || []) as unknown as ProductRow[]) {
     const normalizedImages = (Array.isArray(row.images) ? row.images : []).filter((url): url is string => typeof url === 'string' && url.trim() !== '');
     const primaryImage = (typeof row.image === 'string' && row.image.trim() !== '') ? row.image : normalizedImages[0] || '';
-    const totalStock = Number(row.product_variants?.reduce((sum, variant) =>
-      sum + toMany(variant.inventory).reduce((variantTotal, inventory) => variantTotal + Number(inventory.stock_quantity || 0), 0), 0) || 0);
 
     // The discounted price lives in products.price; original_price is the
     // strikethrough. A sale outside its window (not started / already ended but
@@ -82,15 +101,70 @@ export async function fetchProducts(): Promise<Product[]> {
       && (endMs === null || endMs > now);
     const basePrice = row.original_price != null ? Number(row.original_price) : Number(row.price);
 
-    const variantLabels = [...new Set((row.product_variants || [])
-      .map(v => [v.size, v.scent].filter(Boolean).join(' / ').trim())
-      .filter(Boolean))];
+    const allVariants = row.product_variants || [];
+    // Expired and Near Expiry variants are never shown or sold. The product
+    // survives while one variant is still sellable; it disappears only when
+    // every single variant is flagged.
+    const sellableVariants = allVariants.filter(variant => isSellableVariant(variant.expiry_date));
+    if (allVariants.length > 0 && sellableVariants.length === 0) continue;
 
-    return {
+    const visibleVariants = allVariants.length ? sellableVariants : allVariants;
+    const labelOf = (variant: NonNullable<ProductRow['product_variants']>[number]) =>
+      variant.size?.trim() || '';
+    const stockOf = (variants: NonNullable<ProductRow['product_variants']>) => variants.reduce((sum, variant) =>
+      sum + toMany(variant.inventory).reduce((variantTotal, inventory) => variantTotal + Number(inventory.stock_quantity || 0), 0), 0);
+
+    const totalStock = Number(stockOf(visibleVariants));
+
+    const variantLabels = [...new Set(visibleVariants.map(labelOf).filter(Boolean))];
+
+    // Per-variant pricing keyed by the exact label the selector shows. Prices
+    // are the sale-aware unit price; originalPrices stay at the full listing.
+    const variantPrices: Record<string, number> = {};
+    const variantOriginalPrices: Record<string, number> = {};
+    const variantOptions: NonNullable<Product['variantOptions']> = [];
+    for (const variant of visibleVariants) {
+      const label = labelOf(variant);
+      if (!label) continue;
+      const additional = Number(variant.additional_price || 0);
+      const listing = basePrice + additional;
+      const effective = saleActive ? Number(row.price) + additional : listing;
+      variantPrices[label] = effective;
+      variantOriginalPrices[label] = listing;
+      variantOptions.push({
+        id: variant.id,
+        label,
+        price: effective,
+        originalPrice: saleActive ? listing : undefined,
+        stock: stockOf([variant]),
+        expiryDate: variant.expiry_date ?? null,
+        expiryStatus: expiryStatus(variant.expiry_date),
+      });
+    }
+
+    const pricedVariants = visibleVariants.filter(variant => labelOf(variant));
+    const displayPrice = pricedVariants.length
+      ? Math.min(...pricedVariants.map(variant => variantPrices[labelOf(variant)]))
+      : (saleActive ? Number(row.price) : basePrice);
+    const displayOriginal = saleActive && pricedVariants.length
+      ? Math.min(...pricedVariants.map(variant => basePrice + Number(variant.additional_price || 0)))
+      : undefined;
+
+    // Variant photos keyed by the exact label the variant selector shows, so
+    // the product gallery can follow whichever option is selected.
+    const variantImages: Record<string, string[]> = {};
+    for (const variant of visibleVariants) {
+      const label = labelOf(variant);
+      const urls = (Array.isArray(variant.images) ? variant.images : [])
+        .filter((url): url is string => typeof url === 'string' && url.trim() !== '');
+      if (label && urls.length) variantImages[label] = urls;
+    }
+
+    products.push({
       id: row.id,
       name: row.name,
-      price: saleActive ? Number(row.price) : basePrice,
-      originalPrice: saleActive && row.original_price != null ? Number(row.original_price) : undefined,
+      price: displayPrice,
+      originalPrice: displayOriginal,
       salePrice: saleActive && row.sale_price != null ? Number(row.sale_price) : null,
       discountType: saleActive ? (row.discount_type || null) : null,
       discountValue: saleActive ? (row.discount_value == null ? null : Number(row.discount_value)) : null,
@@ -105,16 +179,21 @@ export async function fetchProducts(): Promise<Product[]> {
       badge: row.badge || undefined,
       brand: row.brands?.name || row.brand || '',
       category: row.categories?.name || row.category || '',
-      variants: buildVariantGroups(row.product_variants) || row.variants,
-      variantId: row.product_variants?.[0]?.id,
+      variants: buildVariantGroups(visibleVariants) || row.variants,
+      variantImages: Object.keys(variantImages).length ? variantImages : undefined,
+      variantPrices: Object.keys(variantPrices).length ? variantPrices : undefined,
+      variantOriginalPrices: Object.keys(variantOriginalPrices).length ? variantOriginalPrices : undefined,
+      variantOptions: variantOptions.length ? variantOptions : undefined,
+      variantId: visibleVariants[0]?.id,
       variantName: variantLabels.length
-        ? (variantLabels.length === 1 ? variantLabels[0] : `${row.product_variants?.length || variantLabels.length} variants`)
+        ? (variantLabels.length === 1 ? variantLabels[0] : `${visibleVariants.length || variantLabels.length} variants`)
         : undefined,
       stock: totalStock,
       inStock: totalStock > 0 && row.status !== 'Archived',
       status: row.status,
-    };
-  });
+    });
+  }
+  return products;
 }
 
 // Reverts every product whose sale window has ended (price <- original_price)
@@ -137,7 +216,6 @@ export async function fetchCategories(): Promise<CatalogCategory[]> {
 
   const merged = new Map<string, CatalogCategory>();
   (data || []).forEach((row: any) => {
-    if (row.name === 'Oral Care') return;
     const isPersonalBody = row.name === 'Personal Care' || row.name === 'Body Care';
     const key = isPersonalBody ? 'personal-body-care' : row.name.toLowerCase().replace(/\s+/g, '-');
     const current = merged.get(key);
@@ -170,35 +248,42 @@ export async function createOrder(input: {
   const tax = subtotal * VAT_RATE;
   const total = subtotal + shippingFee + tax;
 
-  const variantIds = input.items.map(item => item.variant).filter((value): value is string => Boolean(value));
+  // Every line must name its exact variant; never guess one from the product,
+  // otherwise a cart holding two variants of one product could check out with
+  // the wrong SKU and the wrong price.
+  const variantIds = input.items.map(item => item.variant);
+  if (variantIds.some((variantId): variantId is undefined => !variantId)) {
+    throw new Error('One or more cart items are missing their variant. Remove it and add the product again.');
+  }
+
   const { data: variants, error: variantError } = await supabase
     .from('product_variants')
     .select('variant_id, product_id')
-    .in('product_id', input.items.map(item => item.productId));
+    .in('variant_id', variantIds as string[]);
   if (variantError) throw variantError;
 
-  const fallbackVariantByProduct = new Map((variants || []).map(variant => [variant.product_id, variant.variant_id]));
-  const requestedVariantIds = input.items.map(item => item.variant ?? fallbackVariantByProduct.get(item.productId)).filter((value): value is string => Boolean(value));
+  const productByVariant = new Map((variants || []).map(variant => [variant.variant_id, variant.product_id]));
 
   const { data: inventoryRows, error: inventoryError } = await supabase
     .from('inventory')
     .select('variant_id, stock_quantity')
-    .in('variant_id', requestedVariantIds);
+    .in('variant_id', variantIds as string[]);
   if (inventoryError) throw inventoryError;
 
   const inventoryMap = new Map((inventoryRows || []).map(row => [row.variant_id, Number(row.stock_quantity || 0)]));
 
   for (const item of input.items) {
-    const variantId = item.variant ?? fallbackVariantByProduct.get(item.productId);
-    if (!variantId) throw new Error('One or more products are not configured with a sellable variant.');
-    const available = inventoryMap.get(variantId) ?? 0;
+    if (productByVariant.get(item.variant!) !== item.productId) {
+      throw new Error('One or more cart items no longer match their product variant.');
+    }
+    const available = inventoryMap.get(item.variant!) ?? 0;
     if (available < item.quantity) {
       throw new Error(`Only ${available} unit(s) remain for one of the selected products.`);
     }
   }
 
   const rpcItems = input.items.map(item => ({
-    variant_id: item.variant ?? fallbackVariantByProduct.get(item.productId),
+    variant_id: item.variant,
     quantity: item.quantity,
     price_at_purchase: item.unitPrice,
   }));

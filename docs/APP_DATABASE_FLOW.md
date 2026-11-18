@@ -1,7 +1,7 @@
 # How the App Follows the Database ERD — Step-by-Step Walkthrough
 
-**Companion to:** [`supabase/schema_complete_ERD.md`](../supabase/schema_complete_ERD.md) (diagram) and [`supabase/schema_complete.sql`](../supabase/schema_complete.sql) (live schema).
-**Live project:** Supabase `lvtlehesxweckggyemnm` · PostgreSQL 17.6 · 25 tables · all RLS-enabled · 8 RPCs.
+**Companion to:** [`supabase/schema_complete_ERD.md`](../supabase/schema_complete_ERD.md) (diagram) and [`supabase/schema/idempotent/schema_complete.sql`](../supabase/schema/idempotent/schema_complete.sql) (live schema).
+**Live project:** Supabase `lvtlehesxweckggyemnm` · PostgreSQL 17.6 · 24 tables · all RLS-enabled · 8 RPCs.
 
 ---
 
@@ -9,14 +9,14 @@
 
 > "The app is a thin React client over Postgres. Every screen reads and writes **through the database**, and every write goes through a **transactional function** so the data can never end up half-written. The ERD is not a picture of the database — it *is* the database. When you add a product in the admin panel you are actually inserting a row into `products`, a row into `product_variants`, and a row into `inventory`, linked by three foreign keys; when a supplier delivers, the purchase order raises `inventory` and writes a permanent trail into `inventory_movements`."
 
-### Table groups (25 tables, 6 groups)
+### Table groups (24 tables, 6 groups)
 
 | Group | Tables | Purpose |
 |---|---|---|
 | **Identity** | `profiles` (PK `user_id`, FK → `auth.users.id`) | One row per person. Stores role, skin profile, account status. |
 | **Catalogue** | `brands`, `categories`, `products`, `product_variants` | What we sell, and the sellable SKUs. |
 | **Stock** | `inventory`, `inventory_movements` | Current stock + the append-only ledger of how it changed. |
-| **Supply** | `suppliers`, `supplier_products`, `purchase_orders`, `purchase_order_items` | Who supplies us, what they supply, and what we ordered. |
+| **Supply** | `suppliers`, `purchase_orders`, `purchase_order_items` | Who supplies us and what we ordered. Brands (and therefore products) belong to exactly one supplier. |
 | **Selling** | `orders`, `order_items`, `payments`, `cart_items`, `wishlist_items`, `product_reviews` | Customer side of the business. |
 | **Engagement** | `recommendation_rules`, `recommendations`, `customer_product_interactions`, `user_activity_log`, `support_inquiries`, `support_responses`, `user_addresses`, `user_payment_methods` | Personalisation, audit trail, support, customer data. |
 
@@ -33,7 +33,7 @@
 | 1 | `brands` | *read* — the brand row for the name typed in the form | `products.brand_id` is a FK, so the brand must already exist |
 | 2 | `categories` | *read* — the category row for the name typed in the form | `products.category_id` is a FK |
 | 3 | **`products`** | **INSERT** — `product_id, brand_id, category_id, name, price, images, status…` | the product row itself |
-| 4 | **`product_variants`** | **INSERT** — `variant_id, product_id, sku, size, scent, additional_price` | a product is not sellable until it has a SKU |
+| 4 | **`product_variants`** | **INSERT** — `variant_id, product_id, sku, size, additional_price` | a product is not sellable until it has a SKU |
 | 5 | **`inventory`** | **INSERT** — `inventory_id, variant_id, stock_quantity, reorder_level` | stock lives per variant, not per product |
 
 Plus (not a table): the image file goes to the **`product-images`** storage bucket; only the URL is stored in `products.image` / `products.images[]`.
@@ -49,16 +49,18 @@ Plus (not a table): the image file goes to the **`product-images`** storage buck
 
 ## 2. Suppliers and logistics (the connection you asked for)
 
-### 2.1 Link a supplier to the products they supply
+### 2.1 Create a supplier, its brand, and its catalogue
 
-*Admin → Suppliers → Add/Edit Supplier → "Products Supplied" checkboxes.*
+*Admin -> Suppliers -> Add Supplier (or Add Brand on an existing supplier).*
 
 | Step | Table | Operation |
 |---|---|---|
 | 1 | `suppliers` | INSERT/UPDATE the supplier (name, contact, status) |
-| 2 | `supplier_products` | DELETE the old links, INSERT one row per linked product |
+| 2 | `brands` | INSERT one unique brand owned by that supplier |
+| 3 | `products` | INSERT the brand's products |
+| 4 | `product_variants` + `inventory` | INSERT size-only variants and their opening stock |
 
-`supplier_products` is a **junction table** with a composite key `(supplier_id, product_id)` — this is the many-to-many link that answers *"our products come from our suppliers"*. A supplier can supply many products; a product can be sourced from several suppliers.
+Ownership is one-to-many all the way down: `suppliers.supplier_id -> brands.supplier_id -> products.brand_id -> product_variants.product_id`. A brand belongs to exactly one supplier, so a product has exactly one supplier through its brand. There is no supplier/product junction table.
 
 ### 2.2 Order stock from a supplier
 
@@ -106,6 +108,8 @@ Pure **reads**, no writes:
 | Home / Category / Search | `products` + `brands(name)` + `categories(name)` + `product_variants` + `inventory(stock_quantity)` |
 | Product page | same, plus `product_reviews` (average rating + list) |
 | "For You" | `recommendation_rules` + `profiles.skin_profile` + `customer_product_interactions` + `cart_items` + `wishlist_items` + `orders` → `recommendations` INSERT |
+
+The navigation search overlay calls `get_search_suggestions(5)`. The security-definer RPC returns up to five `frequent` products from `customer_product_interactions` for the signed-in customer (or the global interaction fallback for guests/no history) and five `top_selling` products from non-cancelled `order_items`, limited to active products with a sellable variant.
 
 `inventory` is read through the variant, so **stock is always shown at SKU level**.
 
@@ -169,7 +173,7 @@ Chat widget / Contact page → INSERT `support_inquiries(user_id, customer_name,
 
 ## 5. Security model (show this if the professor asks "who can write what?")
 
-`has_permission(module, action)` maps roles to modules; RLS policies on all 25 tables enforce it; RPCs are `SECURITY DEFINER` so business rules (e.g. "only a customer can place an order") live in one place.
+`has_permission(module, action)` maps roles to modules; RLS policies on all 24 tables enforce it; RPCs are `SECURITY DEFINER` so business rules (e.g. "only a customer can place an order") live in one place.
 
 | Role | Modules |
 |---|---|
@@ -186,7 +190,7 @@ Chat widget / Contact page → INSERT `support_inquiries(user_id, customer_name,
 
 **"Where is the price and quantity stored?"** → price in `products.price` (+ `product_variants.additional_price`); quantity in `inventory.stock_quantity`, which is **per variant**, and only ever changes through `inventory_movements`.
 
-**"How do you know which supplier a product came from?"** → `supplier_products(supplier_id, product_id)` many-to-many; the purchase that replenished it is `purchase_orders.purchase_order_id` recorded on the `inventory_movements` row.
+**"How do you know which supplier a product came from?"** -> `products.brand_id -> brands.supplier_id`; the purchase that replenished it is `purchase_orders.purchase_order_id` recorded on the `inventory_movements` row.
 
 **"What if two customers buy the last item?"** → `place_order` locks the inventory row `FOR UPDATE` and decrements inside a transaction, so the second checkout fails with "Insufficient stock" and rolls back.
 
@@ -196,4 +200,4 @@ Chat widget / Contact page → INSERT `support_inquiries(user_id, customer_name,
 
 **"What is the difference between `inventory` and `inventory_movements`?"** → `inventory` is the current balance (fast reads, one row per variant); `inventory_movements` is the ledger (audit, traceability, and the source for stock reports).
 
-**"Where is the ERD?"** → `supabase/schema_complete_ERD.md` (Mermaid + DBML), generated from `supabase/schema_complete.sql`, which is the exact script applied to the live database.
+**"Where is the ERD?"** → `supabase/schema_complete_ERD.md` (Mermaid + DBML), generated from `supabase/schema/idempotent/schema_complete.sql`, which is the exact script applied to the live database.

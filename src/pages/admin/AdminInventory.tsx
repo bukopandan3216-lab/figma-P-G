@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ArrowDown, ArrowUp, AlertTriangle, Edit2, Trash2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { safeImage } from '../../lib/image';
-import { Button, Badge, DataTable, Modal, Input, ProgressBar, useToast, ToastContainer, LoadingState } from '../../components/ui';
+import { Button, Badge, DataTable, Modal, Input, ProgressBar, useToast, ToastContainer, LoadingState, useTableMetrics } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { hasModulePermission } from '../../lib/permissions';
 import AdminSidebar from '../../components/AdminSidebar';
+import { expiryStatus, expiryBadgeVariant, formatExpiryDate } from '../../lib/expiry';
 
 // Each row is one VARIANT, because that's the level inventory is actually
 // tracked at in the database (public.inventory.variant_id). A product with
@@ -20,6 +22,7 @@ interface VariantStockRow {
   variantLabel: string;
   stock: number;
   reorderLevel: number;
+  expiryDate: string | null;
 }
 
 interface StockRow {
@@ -37,6 +40,7 @@ interface StockRow {
   variantRows: VariantStockRow[];
   isOutOfStock: boolean;
   isLowStock: boolean;
+  expiryDate: string | null;
 }
 interface InventoryActionTarget {
   inventoryId: string;
@@ -58,6 +62,17 @@ function toOne<T>(value: T | T[] | null | undefined): T | undefined {
   return value ?? undefined;
 }
 
+// Dashboard expiry links land here as /admin/inventory?filter=near-expiry|expired.
+type StockFilter = 'All' | 'In Stock' | 'Low Stock' | 'Out of Stock' | 'Near Expiry' | 'Expired';
+const FILTER_FROM_QUERY: Record<string, StockFilter> = {
+  'near-expiry': 'Near Expiry',
+  near_expiry: 'Near Expiry',
+  expired: 'Expired',
+  'in-stock': 'In Stock',
+  'low-stock': 'Low Stock',
+  'out-of-stock': 'Out of Stock',
+};
+
 export default function AdminInventory() {
   const { user } = useAuth();
   const isSuperAdmin = user?.role === 'super_admin';
@@ -74,16 +89,20 @@ export default function AdminInventory() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [editForm, setEditForm] = useState({ stock: '', reorderLevel: '' });
   const [selectedCategory, setSelectedCategory] = useState('All');
-  const [selectedStockFilter, setSelectedStockFilter] = useState<'All' | 'In Stock' | 'Low Stock' | 'Out of Stock'>('All');
+  const [selectedStockFilter, setSelectedStockFilter] = useState<StockFilter>('All');
+  const [searchParams] = useSearchParams();
   const [form, setForm] = useState({ qty: '', ref: '', notes: '' });
   const { toasts, add: addToast, remove } = useToast();
+  const MOVEMENT_WINDOW = 6;
+  const { headRef: mvHeadRef, bodyRef: mvBodyRef, headH: mvHead, rowH: mvRow } = useTableMetrics(movements.length);
+  const mvWindow = mvHead + mvRow * MOVEMENT_WINDOW;
 
   const loadInventory = async () => {
     setLoading(true);
     setError(null);
     const { data, error: fetchError } = await supabase
       .from('products')
-      .select('id:product_id, name, image, status, brands(name), categories(name), product_variants(id:variant_id, size, scent, inventory(id:inventory_id, stock_quantity, reorder_level))')
+      .select('id:product_id, name, image, status, brands(name), categories(name), product_variants(id:variant_id, size, expiry_date, inventory(id:inventory_id, stock_quantity, reorder_level))')
       .neq('status', 'Archived')
       .order('name');
     if (fetchError) { setError(fetchError.message); setLoading(false); return; }
@@ -112,13 +131,14 @@ export default function AdminInventory() {
         inventoryId: variantRows[0].inventory?.id || variantRows[0].inventory?.[0]?.id || '',
         variantId: variantRows[0].id,
         product: p.name,
-        variantLabel: variantRows.length > 1 ? `${variantRows.length} variants` : [variantRows[0].size, variantRows[0].scent].filter(Boolean).join(' / ') || 'Standard',
+        variantLabel: variantRows.length > 1 ? `${variantRows.length} variants` : variantRows[0].size || 'Standard',
         brand: p.brands?.name || '',
         category: p.categories?.name || '',
         stock: sumStock,
         reorderLevel: maxReorder,
         image: p.image,
         variantCount: variantRows.length,
+        expiryDate: variantRows[0].expiry_date ?? null,
         isOutOfStock: variantRows.every((variant: any) => {
           const inv = toOne<{ stock_quantity: number }>(variant.inventory);
           return Number(inv?.stock_quantity || 0) === 0;
@@ -132,9 +152,10 @@ export default function AdminInventory() {
           return {
             inventoryId: inv?.id || '',
             variantId: v.id,
-            variantLabel: [v.size, v.scent].filter(Boolean).join(' / ') || 'Standard',
+            variantLabel: v.size || 'Standard',
             stock: Number(inv?.stock_quantity || 0),
             reorderLevel: Number(inv?.reorder_level ?? 10),
+            expiryDate: v.expiry_date ?? null,
           };
         }),
       });
@@ -146,7 +167,7 @@ export default function AdminInventory() {
   const loadMovements = async () => {
     const { data, error: movementError } = await supabase
       .from('inventory_movements')
-      .select('id:movement_id, movement_no, variant_id, movement_type, quantity, stock_after, user_document, reference, created_at, product_variants(size, scent, products(name))')
+      .select('id:movement_id, movement_no, variant_id, movement_type, quantity, stock_after, user_document, reference, created_at, product_variants(size, products(name))')
       .order('created_at', { ascending: false })
       .limit(30);
 
@@ -155,7 +176,7 @@ export default function AdminInventory() {
       id: row.id,
       movementNo: row.movement_no || row.id.slice(0, 8),
       product: row.product_variants?.products?.name || row.variant_id,
-      variant: [row.product_variants?.size, row.product_variants?.scent].filter(Boolean).join(' / ') || 'Standard',
+      variant: row.product_variants?.size || 'Standard',
       type: row.movement_type,
       qty: row.quantity,
       stockAfter: row.stock_after ?? null,
@@ -166,6 +187,12 @@ export default function AdminInventory() {
   };
 
   useEffect(() => { void loadInventory(); void loadMovements(); }, []);
+
+  // Deep link from the Dashboard expiry table: preselect the matching filter.
+  useEffect(() => {
+    const fromQuery = FILTER_FROM_QUERY[(searchParams.get('filter') || '').toLowerCase()];
+    if (fromQuery) setSelectedStockFilter(fromQuery);
+  }, [searchParams]);
 
   const openModal = (type: 'in' | 'out', target: InventoryActionTarget) => {
     setModalType(type);
@@ -260,15 +287,20 @@ export default function AdminInventory() {
   const totalUnits = categoryVariants.reduce((sum, { variant }) => sum + variant.stock, 0);
   const totalVariants = categoryVariants.length;
   const totalProducts = filteredInventory.length;
+  const nearExpiryCount = categoryVariants.filter(({ variant }) => expiryStatus(variant.expiryDate) === 'Near Expiry').length;
+  const expiredCount = categoryVariants.filter(({ variant }) => expiryStatus(variant.expiryDate) === 'Expired').length;
   const displayInventory = categoryVariants
     .filter(({ variant }) => {
       const isOutOfStock = variant.stock === 0;
       const isLowStock = variant.stock > 0 && variant.stock < variant.reorderLevel;
+      const status = expiryStatus(variant.expiryDate);
       return (
         selectedStockFilter === 'All' ||
         (selectedStockFilter === 'Low Stock' && isLowStock) ||
         (selectedStockFilter === 'Out of Stock' && isOutOfStock) ||
-        (selectedStockFilter === 'In Stock' && !isOutOfStock && !isLowStock)
+        (selectedStockFilter === 'In Stock' && !isOutOfStock && !isLowStock) ||
+        (selectedStockFilter === 'Near Expiry' && status === 'Near Expiry') ||
+        (selectedStockFilter === 'Expired' && status === 'Expired')
       );
     })
     .map(({ item, variant }) => ({
@@ -278,6 +310,7 @@ export default function AdminInventory() {
       variantLabel: variant.variantLabel,
       stock: variant.stock,
       reorderLevel: variant.reorderLevel,
+      expiryDate: variant.expiryDate,
       variantCount: 1,
       isOutOfStock: variant.stock === 0,
       isLowStock: variant.stock > 0 && variant.stock < variant.reorderLevel,
@@ -295,12 +328,14 @@ export default function AdminInventory() {
           </div>
         </div>
 
-        {(lowStockCount > 0 || outCount > 0) && (
+        {(lowStockCount > 0 || outCount > 0 || nearExpiryCount > 0 || expiredCount > 0) && (
           <div className="bg-amber-50 border border-amber-200 rounded-[var(--radius-lg)] p-4 flex items-center gap-3">
             <AlertTriangle size={16} className="text-amber-600 flex-shrink-0" />
             <p className="text-sm text-amber-800">
               {lowStockCount > 0 && <><strong>{lowStockCount} item{lowStockCount > 1 ? 's' : ''}</strong> running low. </>}
-              {outCount > 0 && <><strong>{outCount} item{outCount > 1 ? 's' : ''}</strong> out of stock.</>}
+              {outCount > 0 && <><strong>{outCount} item{outCount > 1 ? 's' : ''}</strong> out of stock. </>}
+              {nearExpiryCount > 0 && <><strong>{nearExpiryCount} variant{nearExpiryCount > 1 ? 's' : ''}</strong> near expiry (hidden from customers). </>}
+              {expiredCount > 0 && <><strong>{expiredCount} variant{expiredCount > 1 ? 's' : ''}</strong> expired (hidden from customers).</>}
             </p>
           </div>
         )}
@@ -311,17 +346,19 @@ export default function AdminInventory() {
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--muted-foreground)]">Inventory Summary</p>
               <h2 className="mt-1 text-xl font-bold text-[var(--foreground)]">{totalProducts} products · {totalVariants} variants</h2>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
               {[
                 { label: 'Total Stock', count: totalUnits, color: 'text-sky-600', subtle: 'bg-sky-50', filter: 'All' },
                 { label: 'In Stock', count: inStockCount, color: 'text-emerald-600', subtle: 'bg-emerald-50', filter: 'In Stock' },
                 { label: 'Low Stock', count: lowStockCount, color: 'text-amber-600', subtle: 'bg-amber-50', filter: 'Low Stock' },
                 { label: 'Out of Stock', count: outCount, color: 'text-red-600', subtle: 'bg-red-50', filter: 'Out of Stock' },
+                { label: 'Near Expiry', count: nearExpiryCount, color: 'text-orange-600', subtle: 'bg-orange-50', filter: 'Near Expiry' },
+                { label: 'Expired', count: expiredCount, color: 'text-red-700', subtle: 'bg-red-50', filter: 'Expired' },
               ].map((s) => (
                 <button
                   key={s.label}
                   type="button"
-                  onClick={() => setSelectedStockFilter(s.filter as 'All' | 'In Stock' | 'Low Stock' | 'Out of Stock')}
+                  onClick={() => setSelectedStockFilter(s.filter as StockFilter)}
                   className={`${s.subtle} rounded-[var(--radius-lg)] px-3 py-2.5 text-left transition hover:brightness-[0.98] ${selectedStockFilter === s.filter ? 'ring-2 ring-[var(--primary)] ring-offset-0' : ''}`}
                 >
                   <div className={`text-2xl font-bold ${s.color}`}>{s.count}</div>
@@ -358,13 +395,15 @@ export default function AdminInventory() {
               <select
                 id="stock-filter"
                 value={selectedStockFilter}
-                onChange={(event) => setSelectedStockFilter(event.target.value as 'All' | 'In Stock' | 'Low Stock' | 'Out of Stock')}
+                onChange={(event) => setSelectedStockFilter(event.target.value as StockFilter)}
                 className="rounded-full border border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] outline-none focus:border-[var(--primary)]"
               >
                 <option value="All">All</option>
                 <option value="In Stock">In Stock</option>
                 <option value="Low Stock">Low Stock</option>
                 <option value="Out of Stock">Out of Stock</option>
+                <option value="Near Expiry">Near Expiry</option>
+                <option value="Expired">Expired</option>
               </select>
             </div>
           </div>
@@ -377,6 +416,11 @@ export default function AdminInventory() {
                 : i.isLowStock
                   ? { label: 'Low Stock', variant: 'warning' as const }
                   : { label: 'In Stock', variant: 'success' as const },
+              _expiry: {
+                label: expiryStatus(i.expiryDate),
+                variant: expiryBadgeVariant(expiryStatus(i.expiryDate)),
+                date: formatExpiryDate(i.expiryDate),
+              },
             })) as any}
             emptyMessage={loading ? <LoadingState message="Hang tight, loading inventory…" /> : 'No inventory items found.'}
             columns={[
@@ -384,8 +428,8 @@ export default function AdminInventory() {
                 <div className="flex items-center gap-3">
                   <img src={safeImage(row.image, row.product)} alt="" className="w-8 h-8 object-cover rounded bg-[var(--secondary)]" />
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-[var(--foreground)]">{row.product}</div>
-                    <div className="text-xs text-[var(--muted-foreground)]">{row.brand} · {row.variantLabel}</div>
+                    <div className="text-sm font-medium text-[var(--foreground)] truncate">{row.product}</div>
+                    <div className="text-xs text-[var(--muted-foreground)] truncate">{row.brand} · {row.variantLabel}</div>
                   </div>
                 </div>
               )},
@@ -398,7 +442,13 @@ export default function AdminInventory() {
                 </div>
               )},
               { key: 'reorderLevel', label: 'Reorder At', render: (row: any) => <span className="font-mono text-sm text-[var(--muted-foreground)]">{row.reorderLevel} units</span> },
-              { key: '_status', label: 'Status', render: (row: any) => <Badge variant={row._status.variant}>{row._status.label}</Badge> },
+              { key: 'expiryDate', label: 'Expiry', render: (row: any) => (
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs text-[var(--muted-foreground)]">{row._expiry.date}</span>
+                  <Badge variant={row._expiry.variant}>{row._expiry.label}</Badge>
+                </div>
+              )},
+              { key: '_status', label: 'Stock Status', render: (row: any) => <Badge variant={row._status.variant}>{row._status.label}</Badge> },
               { key: 'actions', label: 'Actions', sortable: false, render: (row: any) => {
                 const target = row as InventoryActionTarget;
                 return (
@@ -418,22 +468,22 @@ export default function AdminInventory() {
 
         <div className="bg-white border border-[var(--border)] rounded-[var(--radius-xl)] p-5">
           <h2 className="font-semibold text-sm mb-4">Movement History</h2>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overflow-y-auto" style={{ minHeight: mvWindow, maxHeight: mvWindow }}>
             <table className="w-full text-sm">
-              <thead>
+              <thead ref={mvHeadRef}>
                 <tr className="border-b border-[var(--border)]">
                   {['Movement No', 'Product', 'Type', 'Quantity', 'Stock After', 'Document', 'Date', 'Reference'].map(h => (
-                    <th key={h} className="text-left px-3 py-2 text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wide">{h}</th>
+                    <th key={h} className="sticky top-0 z-10 bg-white border-b border-[var(--border)] text-left px-3 py-2 text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
               </thead>
-              <tbody>
+              <tbody ref={mvBodyRef} className="whitespace-nowrap">
                 {movements.map(m => (
                   <tr key={m.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--secondary)] transition-colors">
                     <td className="px-3 py-3 font-mono text-xs text-[var(--muted-foreground)]">{m.movementNo}</td>
                     <td className="px-3 py-3">
-                      <div className="font-medium">{m.product}</div>
-                      <div className="text-xs text-[var(--muted-foreground)]">{m.variant}</div>
+                      <div className="font-medium max-w-[240px] truncate">{m.product}</div>
+                      <div className="text-xs text-[var(--muted-foreground)] max-w-[240px] truncate">{m.variant}</div>
                     </td>
                     <td className="px-3 py-3">
                       <div className={`flex items-center gap-1.5 text-xs font-medium ${m.type === 'Stock In' ? 'text-emerald-600' : 'text-red-500'}`}>
@@ -448,7 +498,7 @@ export default function AdminInventory() {
                   </tr>
                 ))}
                 {movements.length === 0 && (
-                  <tr><td colSpan={8} className="px-3 py-6 text-center text-xs text-[var(--muted-foreground)]">No stock movements recorded yet.</td></tr>
+                  <tr><td colSpan={8} style={{ height: mvRow * MOVEMENT_WINDOW }} className="px-3 text-center text-xs text-[var(--muted-foreground)]">No stock movements recorded yet.</td></tr>
                 )}
               </tbody>
             </table>

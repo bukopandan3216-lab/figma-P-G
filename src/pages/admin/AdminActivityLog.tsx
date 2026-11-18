@@ -175,7 +175,12 @@ export default function AdminActivityLog() {
             data={customerActivity.map(row => ({ ...row, occurred: formatTime(row.time) })) as any}
             emptyMessage={loading ? <LoadingState message="Hang tight, loading customer activity…" /> : 'No customer activity recorded.'}
             columns={[
-              { key: 'customer', label: 'Customer', render: (row: any) => <div><div className="font-medium">{row.customer}</div><div className="text-xs text-[var(--muted-foreground)]">{row.email}</div></div> },
+              { key: 'customer', label: 'Customer', render: (row: any) => (
+                <div className="max-w-[260px]">
+                  <div className="font-medium truncate">{row.customer}</div>
+                  <div className="text-xs text-[var(--muted-foreground)] truncate">{row.email}</div>
+                </div>
+              )},
               { key: 'action', label: 'Activity', render: (row: any) => formatAction(row.action) },
               { key: 'details', label: 'Details', render: (row: any) => <span className="block max-w-[320px] truncate text-xs text-[var(--muted-foreground)]" title={formatDetails(row.action, row.details)}>{formatDetails(row.action, row.details)}</span> },
               { key: 'occurred', label: 'Time' },

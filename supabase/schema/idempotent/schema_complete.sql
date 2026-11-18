@@ -1,11 +1,18 @@
 -- ============================================================================
--- schema_complete.sql — P&G Beauty web app (consolidated schema)
+-- schema_complete.sql â€” P&G Beauty web app (canonical idempotent schema)
 --
--- Single-file, idempotent schema reflecting exactly what the running app uses.
+-- ONE file for both jobs:
+--   * fresh project  â€” creates every table, index, view, function, trigger,
+--                      policy, grant and the storage bucket;
+--   * existing DB    â€” section "1b" applies the guarded upgrades (entity-keyed
+--                      ids, variant photos, per-variant expiry, cart surrogate
+--                      key, discount columns) before the rest is re-applied.
+--
 -- Derived from the effective migration chain:
 --   schema.sql -> relationship_fix.sql -> order_fix_update.sql
 --   -> pdf_rbac.sql -> customer_status_activity.sql
 --   -> purchase_management.sql -> product_reviews.sql
+--   -> variant_images.sql -> variant_expiry.sql  (both folded in here)
 --
 -- employee_rbac.sql is intentionally EXCLUDED: its department-based role model
 -- ('Customer', 'Staff', 'Manager', 'Super Admin') is reverted by pdf_rbac.sql and
@@ -13,8 +20,13 @@
 --
 -- Role model expected everywhere: customer | beauty_staff | beauty_admin | super_admin
 --
--- Usage: run once in the Supabase SQL Editor on an empty project.
--- Safe to re-run: everything is IF NOT EXISTS / CREATE OR REPLACE.
+-- Usage: run once in the Supabase SQL Editor (empty project or existing one).
+-- Safe to re-run: everything is IF NOT EXISTS / CREATE OR REPLACE and every
+-- destructive upgrade step is guarded.
+--
+-- The split equivalents live in ../split/: schema_fresh.sql (empty project
+-- only) and schema_upgrade.sql (existing project only). Those two are derived
+-- from this file â€” if you change the schema, update this file first.
 -- ============================================================================
 
 begin;
@@ -71,25 +83,6 @@ begin
 end;
 $$;
 
-do $$
-declare
-  v_table text;
-begin
-  foreach v_table in array array[
-    'profiles', 'brands', 'categories', 'products', 'product_variants',
-    'inventory', 'inventory_movements', 'suppliers', 'supplier_products',
-    'purchase_orders', 'purchase_order_items', 'orders', 'order_items',
-    'payments', 'recommendations', 'customer_product_interactions',
-    'support_inquiries', 'support_responses', 'user_activity_log',
-    'recommendation_rules'
-  ] loop
-    execute format('drop trigger if exists audit_employee_activity on public.%I', v_table);
-    execute format('drop trigger if exists assign_employee_id on public.%I', v_table);
-    execute format('drop trigger if exists initialize_department_inventory on public.%I', v_table);
-  end loop;
-end;
-$$;
-
 drop function if exists public.audit_employee_activity() cascade;
 drop function if exists public.assign_employee_id() cascade;
 drop function if exists public.initialize_department_inventory() cascade;
@@ -98,25 +91,8 @@ drop function if exists public.transfer_central_inventory(uuid, text, integer) c
 drop function if exists public.is_active_user() cascade;
 drop function if exists public.is_active_customer() cascade;
 
-alter table public.profiles drop column if exists full_name;
-alter table public.profiles drop column if exists employee_id;
-alter table public.profiles drop column if exists position;
-alter table public.profiles drop column if exists department;
-alter table public.profiles drop column if exists module_permissions;
-alter table public.inventory drop column if exists department;
-alter table public.orders drop column if exists department;
-alter table public.inventory_movements drop column if exists department;
-
--- Add new columns for user document tracking and stock snapshot
-alter table public.profiles add column if not exists document_number text;
-alter table public.inventory_movements add column if not exists stock_after integer not null default 0 check (stock_after >= 0);
-alter table public.inventory_movements add column if not exists user_document text;
-alter table public.products add column if not exists sale_price numeric;
-alter table public.products add column if not exists discount_type text check (discount_type in ('percentage', 'fixed'));
-alter table public.products add column if not exists discount_value numeric;
-alter table public.products add column if not exists discount_start timestamptz;
-alter table public.products add column if not exists discount_end timestamptz;
-alter table public.brands add column if not exists supplier_id uuid references public.suppliers(supplier_id);
+-- Column-level patches for databases created before an entity-keyed schema are
+-- applied after the tables exist (section 1b below).
 
 drop index if exists public.inventory_variant_department_idx;
 drop index if exists public.orders_department_created_at_idx;
@@ -147,11 +123,24 @@ create table if not exists public.profiles (
   created_at timestamptz not null default now()
 );
 
+-- Suppliers come before brands because brands.supplier_id references it.
+create table if not exists public.suppliers (
+  supplier_id uuid primary key default gen_random_uuid(),
+  name text not null,
+  contact_name text not null default '',
+  contact_email text,
+  phone text,
+  address text,
+  status text not null default 'Active'
+    check (status in ('Active', 'Inactive', 'Archived')),
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.brands (
   brand_id uuid primary key default gen_random_uuid(),
   name text unique not null,
   description text,
-  supplier_id uuid references public.suppliers(supplier_id),
+  supplier_id uuid not null references public.suppliers(supplier_id),
   created_at timestamptz not null default now()
 );
 
@@ -165,7 +154,7 @@ create table if not exists public.categories (
 
 create table if not exists public.products (
   product_id uuid primary key default gen_random_uuid(),
-  brand_id uuid references public.brands(brand_id),
+  brand_id uuid not null references public.brands(brand_id),
   category_id uuid references public.categories(category_id),
   name text not null,
   description text,
@@ -190,10 +179,37 @@ create table if not exists public.products (
 create table if not exists public.product_variants (
   variant_id uuid primary key default gen_random_uuid(),
   product_id uuid not null references public.products(product_id) on delete cascade,
-  size text,
-  scent text,
+  size text not null,
   additional_price numeric not null default 0.00,
-  sku text unique not null
+  -- Hidden supplier cost. Never typed or shown in the UI: purchase orders post
+  -- only quantity and the database fills unit_cost from this column, while the
+  -- admin only ever sees the PO grand total. The markup lives in ONE place in
+  -- the app, SUPPLIER_MARKUP_PERCENT (src/lib/catalog.ts), and derives it as:
+  --     supplier_price = round(full listing / 1.30, 2)
+  -- where full listing = coalesce(products.original_price, products.price)
+  --                      + product_variants.additional_price
+  -- (the price the app lists, ignoring any active sale, so discounts never move
+  -- a cost). Changing the markup does not change any shop price â€” rerun the
+  -- backfill below (safe to re-run) to recompute existing supplier_price rows:
+  --
+  --   update public.product_variants pv
+  --   set supplier_price = round((coalesce(p.original_price, p.price)
+  --                               + pv.additional_price) / 1.30, 2)
+  --   from public.products p where p.product_id = pv.product_id;
+  --
+  supplier_price numeric not null default 0.00
+    check (supplier_price >= 0),
+  sku text unique not null,
+  -- Per-variant photos: file uploads to the public product-images bucket, at
+  -- most 5 per variant, stored as their public URLs. Product-level photos stay
+  -- on products.image / products.images â€” the two never mix. (Must be listed in
+  -- the column-level select grant below or anon/authenticated cannot read it.)
+  images text[] not null default '{}'
+    constraint product_variants_images_max_check check (cardinality(images) <= 5),
+  -- Optional shelf life. Null = no expiry. Expired (<= today) and Near Expiry
+  -- (<= today + 60 days) variants are hidden from customers and refused by
+  -- place_order; the product stays listed while any variant is sellable.
+  expiry_date date
 );
 
 create table if not exists public.inventory (
@@ -204,23 +220,13 @@ create table if not exists public.inventory (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists public.suppliers (
-  supplier_id uuid primary key default gen_random_uuid(),
-  name text not null,
-  contact_name text not null default '',
-  contact_email text,
-  phone text,
-  address text,
-  status text not null default 'Active'
-    check (status in ('Active', 'Inactive', 'Archived')),
-  created_at timestamptz not null default now()
-);
-
-create table if not exists public.supplier_products (
-  supplier_id uuid not null references public.suppliers(supplier_id) on delete cascade,
-  product_id uuid not null references public.products(product_id) on delete cascade,
-  primary key (supplier_id, product_id)
-);
+-- Ownership chain: supplier -> brand -> product -> size variant. A brand can
+-- never be shared between suppliers, and a product/variant inherits exactly
+-- one owner through its brand. `supplier_products` is intentionally absent.
+alter table public.brands alter column supplier_id set not null;
+alter table public.products alter column brand_id set not null;
+alter table public.product_variants alter column size set not null;
+alter table public.product_variants drop column if exists scent;
 
 create table if not exists public.purchase_orders (
   purchase_order_id uuid primary key default gen_random_uuid(),
@@ -339,13 +345,16 @@ create table if not exists public.inventory_movements (
   purchase_order_id uuid references public.purchase_orders(purchase_order_id) on delete set null
 );
 
+-- cart_item_id is a surrogate key so two variants of the same product can sit
+-- in one cart; the unique expression index below keeps one row per
+-- (user, product, variant) and dedupes variant-less rows via the nil uuid.
 create table if not exists public.cart_items (
+  cart_item_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(user_id) on delete cascade,
   product_id uuid not null references public.products(product_id) on delete cascade,
   quantity integer not null check (quantity > 0),
   variant_id uuid references public.product_variants(variant_id),
-  updated_at timestamptz not null default now(),
-  primary key (user_id, product_id)
+  updated_at timestamptz not null default now()
 );
 
 create table if not exists public.wishlist_items (
@@ -414,15 +423,158 @@ create table if not exists public.product_reviews (
   unique (product_id, user_id)
 );
 
+-- Role -> module -> action grants. Single source of truth for RBAC: has_permission()
+-- reads this table (so every RLS policy follows it) and get_my_permissions() returns
+-- the caller's rows so the frontend enforces the exact same matrix. Row Level Security
+-- is enabled with NO policies, so only superuser sessions and security-definer
+-- functions (has_permission, get_my_permissions) can read it.
+create table if not exists public.role_permissions (
+  role text not null check (role in ('beauty_staff', 'beauty_admin')),
+  module text not null,
+  action text not null,
+  created_at timestamptz not null default now(),
+  primary key (role, module, action)
+);
+
+-- ============================================================================
+-- 1b. Upgrades for databases created by the older migration chain
+--     (guarded; every statement is a no-op on a fresh project)
+-- ============================================================================
+
+-- Remove the superseded employee_rbac triggers/columns now that the tables
+-- exist (this block used to run before section 1 and could not work on an
+-- empty project).
+do $$
+declare
+  v_table text;
+begin
+  foreach v_table in array array[
+    'profiles', 'brands', 'categories', 'products', 'product_variants',
+    'inventory', 'inventory_movements', 'suppliers',
+    'purchase_orders', 'purchase_order_items', 'orders', 'order_items',
+    'payments', 'recommendations', 'customer_product_interactions',
+    'support_inquiries', 'support_responses', 'user_activity_log',
+    'recommendation_rules'
+  ] loop
+    execute format('drop trigger if exists audit_employee_activity on public.%I', v_table);
+    execute format('drop trigger if exists assign_employee_id on public.%I', v_table);
+    execute format('drop trigger if exists initialize_department_inventory on public.%I', v_table);
+  end loop;
+end;
+$$;
+
+alter table public.profiles drop column if exists full_name;
+alter table public.profiles drop column if exists employee_id;
+alter table public.profiles drop column if exists position;
+alter table public.profiles drop column if exists department;
+alter table public.profiles drop column if exists module_permissions;
+alter table public.inventory drop column if exists department;
+alter table public.orders drop column if exists department;
+alter table public.inventory_movements drop column if exists department;
+
+-- Columns added after the original schema (no-ops on a fresh project).
+alter table public.profiles add column if not exists document_number text;
+alter table public.inventory_movements add column if not exists stock_after integer not null default 0 check (stock_after >= 0);
+alter table public.inventory_movements add column if not exists user_document text;
+alter table public.products add column if not exists sale_price numeric;
+alter table public.products add column if not exists discount_type text check (discount_type in ('percentage', 'fixed'));
+alter table public.products add column if not exists discount_value numeric;
+alter table public.products add column if not exists discount_start timestamptz;
+alter table public.products add column if not exists discount_end timestamptz;
+alter table public.brands add column if not exists supplier_id uuid references public.suppliers(supplier_id);
+
+-- Per-variant photos (variant_images.sql folded in here).
+alter table public.product_variants add column if not exists images text[] not null default '{}';
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.product_variants'::regclass
+      and conname = 'product_variants_images_max_check'
+  ) then
+    alter table public.product_variants
+      add constraint product_variants_images_max_check
+      check (cardinality(images) <= 5);
+  end if;
+end;
+$$;
+
+-- Per-variant expiry (variant_expiry.sql folded in here).
+alter table public.product_variants add column if not exists expiry_date date;
+
+-- cart_items identity: a surrogate cart_item_id is required because a cart may
+-- hold two variants of one product, making (user_id, product_id) non-unique.
+alter table public.cart_items add column if not exists cart_item_id uuid default gen_random_uuid();
+update public.cart_items set cart_item_id = gen_random_uuid() where cart_item_id is null;
+alter table public.cart_items alter column cart_item_id set not null;
+
+-- Collapse duplicate legacy rows before enforcing one row per SKU.
+delete from public.cart_items a
+using public.cart_items b
+where a.cart_item_id > b.cart_item_id
+  and a.user_id = b.user_id
+  and a.product_id = b.product_id
+  and coalesce(a.variant_id, '00000000-0000-0000-0000-000000000000'::uuid)
+    = coalesce(b.variant_id, '00000000-0000-0000-0000-000000000000'::uuid);
+
+do $$
+declare
+  v_pk text;
+  v_pk_uses_cart_item_id boolean;
+begin
+  select conname into v_pk
+  from pg_constraint
+  where conrelid = 'public.cart_items'::regclass and contype = 'p';
+
+  if v_pk is not null then
+    select exists (
+      select 1
+      from pg_constraint c
+      join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any (c.conkey)
+      where c.conrelid = 'public.cart_items'::regclass
+        and c.contype = 'p'
+        and a.attname = 'cart_item_id'
+    ) into v_pk_uses_cart_item_id;
+
+    if not v_pk_uses_cart_item_id then
+      execute format('alter table public.cart_items drop constraint %I', v_pk);
+    end if;
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.cart_items'::regclass and contype = 'p'
+  ) then
+    alter table public.cart_items add constraint cart_items_pkey primary key (cart_item_id);
+  end if;
+end;
+$$;
+
+drop index if exists public.inventory_variant_department_idx;
+drop index if exists public.orders_department_created_at_idx;
+drop index if exists public.inventory_movements_department_idx;
+drop table if exists public.department_city_mappings;
+drop table if exists public.departments;
+drop table if exists public.employee_audit_log;
+drop sequence if exists public.employee_id_seq;
+
 -- ============================================================================
 -- 2. Indexes
 -- ============================================================================
 
 create index if not exists products_brand_id_idx on public.products(brand_id);
 create index if not exists products_category_id_idx on public.products(category_id);
+-- A supplier owns its brands, a brand owns its products, a product owns its
+-- variants: the same product name cannot appear under two suppliers, and a
+-- product cannot repeat a size.
+create unique index if not exists brands_name_unique_idx on public.brands (lower(btrim(name)));
+create unique index if not exists products_name_unique_idx on public.products (lower(btrim(name)));
+drop index if exists public.product_variants_combo_unique_idx;
+create unique index if not exists product_variants_size_unique_idx
+  on public.product_variants (product_id, lower(btrim(size)));
 create index if not exists product_variants_product_id_idx on public.product_variants(product_id);
+create index if not exists product_variants_expiry_date_idx on public.product_variants(expiry_date);
 create index if not exists inventory_variant_id_idx on public.inventory(variant_id);
-create index if not exists supplier_products_product_id_idx on public.supplier_products(product_id);
 create index if not exists purchase_orders_supplier_id_idx on public.purchase_orders(supplier_id);
 create index if not exists purchase_orders_created_by_idx on public.purchase_orders(created_by);
 create index if not exists purchase_order_items_product_id_idx on public.purchase_order_items(product_id);
@@ -440,6 +592,8 @@ create index if not exists interactions_user_created_idx on public.customer_prod
 create index if not exists interactions_product_type_idx on public.customer_product_interactions(product_id, interaction_type);
 create index if not exists user_activity_log_created_idx on public.user_activity_log(created_at desc);
 create index if not exists cart_items_product_id_idx on public.cart_items(product_id);
+create unique index if not exists cart_items_user_product_variant_key
+  on public.cart_items (user_id, product_id, coalesce(variant_id, '00000000-0000-0000-0000-000000000000'::uuid));
 create index if not exists wishlist_items_product_id_idx on public.wishlist_items(product_id);
 create index if not exists user_addresses_user_id_idx on public.user_addresses(user_id);
 create index if not exists user_payment_methods_user_id_idx on public.user_payment_methods(user_id);
@@ -457,6 +611,29 @@ create sequence if not exists public.order_no_seq;
 create sequence if not exists public.po_no_seq;
 create sequence if not exists public.movement_no_seq;
 create sequence if not exists public.document_no_seq;
+
+-- Older seeds inserted explicit document numbers without advancing the
+-- sequences, so the next insert collided. Bring every sequence up to at least
+-- the highest number already stored (never move it backwards).
+do $$
+declare
+  v_target record;
+begin
+  for v_target in
+    select * from (values
+      ('public.order_no_seq', 'select coalesce(max((regexp_match(order_no, ''-([0-9]+)$''))[1]::bigint), 0) from public.orders where order_no like ''ORD-%'''),
+      ('public.po_no_seq', 'select coalesce(max((regexp_match(po_no, ''-([0-9]+)$''))[1]::bigint), 0) from public.purchase_orders where po_no like ''PO-%'''),
+      ('public.movement_no_seq', 'select coalesce(max((regexp_match(movement_no, ''-([0-9]+)$''))[1]::bigint), 0) from public.inventory_movements where movement_no ~ ''^(SI|SO)-'''),
+      ('public.document_no_seq', 'select coalesce(max((regexp_match(document_number, ''^DOC-([0-9]+)$''))[1]::bigint), 0) from public.profiles where document_number like ''DOC-%''')
+    ) as targets(sequence_name, max_sql)
+  loop
+    execute format(
+      'select setval(%L, greatest((%s), (select last_value from %s), 1))',
+      v_target.sequence_name, v_target.max_sql, v_target.sequence_name
+    );
+  end loop;
+end;
+$$;
 
 -- ============================================================================
 -- 4. Functions
@@ -480,6 +657,35 @@ as $$
   );
 $$;
 
+-- Canonical permission matrix (kept in sync with src/lib/permissions.ts, which is
+-- only a fallback for RPC-unavailable builds). super_admin and customer are handled
+-- directly in has_permission(): super_admin has every grant, customer has none.
+delete from public.role_permissions;
+insert into public.role_permissions (role, module, action) values
+  -- beauty_admin: every operational module except Users & Roles / Settings
+  ('beauty_admin', 'dashboard', 'view'),
+  ('beauty_admin', 'products', 'view'), ('beauty_admin', 'products', 'create'),
+  ('beauty_admin', 'products', 'edit'), ('beauty_admin', 'products', 'delete'),
+  ('beauty_admin', 'inventory', 'view'), ('beauty_admin', 'inventory', 'create'),
+  ('beauty_admin', 'inventory', 'edit'), ('beauty_admin', 'inventory', 'manage'),
+  ('beauty_admin', 'suppliers', 'view'), ('beauty_admin', 'suppliers', 'create'),
+  ('beauty_admin', 'suppliers', 'edit'), ('beauty_admin', 'suppliers', 'delete'),
+  ('beauty_admin', 'purchases', 'view'), ('beauty_admin', 'purchases', 'create'),
+  ('beauty_admin', 'purchases', 'manage'), ('beauty_admin', 'purchases', 'delete'),
+  ('beauty_admin', 'customers', 'view'), ('beauty_admin', 'customers', 'manage'),
+  ('beauty_admin', 'activity', 'view'),
+  ('beauty_admin', 'sales', 'view'), ('beauty_admin', 'sales', 'manage'),
+  ('beauty_admin', 'insights', 'view'),
+  ('beauty_admin', 'recommendations', 'view'),
+  ('beauty_admin', 'reports', 'view'), ('beauty_admin', 'reports', 'generate'),
+  ('beauty_admin', 'reports', 'export'),
+  ('beauty_admin', 'support', 'view'), ('beauty_admin', 'support', 'respond'),
+  -- beauty_staff: stock-keeping and the audit trail only (no dashboard - staff
+  -- modules are backed by sales/suppliers data the role must not read)
+  ('beauty_staff', 'inventory', 'view'), ('beauty_staff', 'inventory', 'manage'),
+  ('beauty_staff', 'activity', 'view')
+on conflict (role, module, action) do nothing;
+
 create or replace function public.has_permission(p_module text, p_action text default 'view')
 returns boolean language sql stable security definer set search_path = public
 as $$
@@ -487,28 +693,48 @@ as $$
     select case
       when p.account_status <> 'Active' then false
       when p.role = 'super_admin' then true
-      when p.role = 'beauty_admin' then case p_module
-        when 'dashboard' then p_action = 'view'
-        when 'products' then p_action = any(array['view', 'create', 'edit', 'delete'])
-        when 'inventory' then p_action = any(array['view', 'create', 'edit', 'manage'])
-        when 'suppliers' then p_action = any(array['view', 'create', 'edit', 'delete'])
-        when 'purchases' then p_action = any(array['view', 'create', 'manage', 'delete'])
-        when 'customers' then p_action = any(array['view', 'manage'])
-        when 'activity' then p_action = 'view'
-        when 'sales' then p_action = any(array['view', 'manage'])
-        when 'insights' then p_action = 'view'
-        when 'recommendations' then p_action = 'view'
-        when 'reports' then p_action = any(array['view', 'generate', 'export'])
-        when 'support' then p_action = any(array['view', 'respond'])
-        else false
-      end
-      when p.role = 'beauty_staff' then
-        (p_module = 'inventory' and p_action = any(array['view', 'manage']))
-        or (p_module = 'activity' and p_action = 'view')
-      else false
+      else exists (
+        select 1 from public.role_permissions rp
+        where rp.role = p.role and rp.module = p_module and rp.action = p_action
+      )
     end
     from public.profiles p where p.user_id = auth.uid()
   ), false);
+$$;
+
+-- Returns the caller's permission map as {module: [actions]} so the frontend
+-- decides menus/redirects from the same matrix the database enforces.
+create or replace function public.get_my_permissions()
+returns jsonb language sql stable security definer set search_path = public
+as $$
+  select coalesce((
+    select case
+      when p.account_status <> 'Active' then '{}'::jsonb
+      when p.role = 'super_admin' then (
+        select jsonb_object_agg(m.module, a.actions)
+        from (
+          values ('dashboard'), ('products'), ('inventory'), ('suppliers'),
+                 ('purchases'), ('customers'), ('activity'), ('sales'),
+                 ('insights'), ('recommendations'), ('reports'), ('support'),
+                 ('users'), ('settings')
+        ) as m(module)
+        cross join lateral (
+          select jsonb_build_array('view', 'create', 'edit', 'manage',
+                                   'generate', 'export', 'respond', 'delete') as actions
+        ) a
+      )
+      else coalesce((
+        select jsonb_object_agg(t.module, t.actions)
+        from (
+          select rp.module, jsonb_agg(rp.action order by rp.action) as actions
+          from public.role_permissions rp
+          where rp.role = p.role
+          group by rp.module
+        ) t
+      ), '{}'::jsonb)
+    end
+    from public.profiles p where p.user_id = auth.uid()
+  ), '{}'::jsonb);
 $$;
 
 -- Auth webhook: create/refresh the profile whenever a user signs up.
@@ -634,6 +860,7 @@ declare
   v_product_id uuid;
   v_recommendation_id uuid;
   v_user_document text;
+  v_expiry date;
 begin
   if p_user_id <> auth.uid() or not public.is_customer() then
     raise exception 'Customer access required';
@@ -656,6 +883,12 @@ begin
     if not found then raise exception 'Inventory row not found'; end if;
     if v_inventory.stock_quantity < v_quantity then raise exception 'Insufficient stock'; end if;
 
+    -- Expired or within the 60-day near-expiry window: never sellable.
+    select expiry_date into v_expiry from public.product_variants where variant_id = v_variant_id;
+    if v_expiry is not null and v_expiry <= current_date + 60 then
+      raise exception 'One or more items are expired or near expiry and cannot be purchased';
+    end if;
+
     insert into public.order_items (order_id, variant_id, quantity, price_at_purchase)
     values (v_order.order_id, v_variant_id, v_quantity, (v_item ->> 'price_at_purchase')::numeric);
     update public.inventory set stock_quantity = stock_quantity - v_quantity, updated_at = now() where inventory_id = v_inventory.inventory_id;
@@ -675,10 +908,197 @@ begin
 
   insert into public.payments (order_id, provider, status, amount)
   values (v_order.order_id, case when p_payment_method = 'cash_on_delivery' then 'Cash on Delivery' else 'Stripe' end, 'Pending', p_total_amount);
+
+  -- The order is in: every cart line has now been checked out.
+  delete from public.cart_items where user_id = p_user_id;
+
   return v_order;
 end;
 $$;
 
+-- Supplier catalog helper: creates one brand that belongs to exactly one
+-- supplier, plus that brand's products and size variants. The hierarchy is
+-- enforced here for both new suppliers and additional brands.
+create or replace function public._create_brand_catalog(
+  p_supplier_id uuid,
+  p_brand_name text,
+  p_products jsonb
+) returns uuid
+language plpgsql security definer set search_path = public
+as $fn$
+declare
+  v_brand_id uuid;
+  v_product jsonb;
+  v_variant jsonb;
+  v_product_id uuid;
+  v_variant_id uuid;
+  v_price numeric;
+  v_min_price numeric;
+  v_size text;
+  v_expiry date;
+  v_category_id uuid;
+  v_product_name text;
+  v_tags text[];
+begin
+  if p_supplier_id is null then
+    raise exception 'Choose a supplier.';
+  end if;
+  if coalesce(btrim(p_brand_name), '') = '' then
+    raise exception 'Brand name is required.';
+  end if;
+  if p_products is null or jsonb_typeof(p_products) <> 'array' or jsonb_array_length(p_products) = 0 then
+    raise exception 'Add at least one product for this brand.';
+  end if;
+  if exists (select 1 from public.brands where lower(btrim(name)) = lower(btrim(p_brand_name))) then
+    raise exception 'Brand "%" already exists. Every supplier needs a unique brand.', btrim(p_brand_name);
+  end if;
+
+  insert into public.brands (name, supplier_id)
+  values (btrim(p_brand_name), p_supplier_id)
+  returning brand_id into v_brand_id;
+
+  for v_product in select value from jsonb_array_elements(p_products) loop
+    v_product_name := btrim(coalesce(v_product->>'name', ''));
+    if v_product_name = '' then
+      raise exception 'Every product needs a name.';
+    end if;
+    if exists (select 1 from public.products where lower(btrim(name)) = lower(v_product_name)) then
+      raise exception 'Product "%" already exists in the catalogue. Products must be unique to this brand.', v_product_name;
+    end if;
+    if coalesce(v_product->'variants', '[]'::jsonb) = '[]'::jsonb then
+      raise exception 'Product "%" needs at least one variant.', v_product_name;
+    end if;
+    v_category_id := nullif(btrim(coalesce(v_product->>'category_id', '')), '')::uuid;
+    if v_category_id is null or not exists (select 1 from public.categories where category_id = v_category_id) then
+      raise exception 'Product "%": choose a valid category.', v_product_name;
+    end if;
+
+    select min((item.value->>'price')::numeric)
+      into v_min_price
+      from jsonb_array_elements(v_product->'variants') item;
+    if v_min_price is null or v_min_price < 0 then
+      raise exception 'Product "%": every variant needs a valid price.', v_product_name;
+    end if;
+
+    select coalesce(array_agg(distinct normalized.tag), '{}'::text[])
+      into v_tags
+      from (
+        select lower(regexp_replace(btrim(tag_item #>> '{}'), '\s+', ' ', 'g')) as tag
+        from jsonb_array_elements(
+          case when jsonb_typeof(v_product->'tags') = 'array' then v_product->'tags' else '[]'::jsonb end
+        ) as tag_item
+        where jsonb_typeof(tag_item) = 'string'
+      ) normalized
+      where normalized.tag <> '';
+
+    insert into public.products (brand_id, category_id, name, description, price, tags, status)
+    values (v_brand_id, v_category_id, v_product_name,
+            nullif(btrim(coalesce(v_product->>'description', '')), ''), v_min_price, v_tags, 'Active')
+    returning product_id into v_product_id;
+
+    for v_variant in select value from jsonb_array_elements(v_product->'variants') loop
+      v_size := nullif(btrim(coalesce(v_variant->>'size', '')), '');
+      if v_size is null then
+        raise exception 'Product "%": each variant needs a size.', v_product_name;
+      end if;
+      v_price := (v_variant->>'price')::numeric;
+      if v_price is null or v_price < 0 then
+        raise exception 'Product "%": each variant needs a valid price.', v_product_name;
+      end if;
+      v_expiry := nullif(btrim(coalesce(v_variant->>'expiry_date', '')), '')::date;
+      if v_expiry is null then
+        raise exception 'Product "%": each variant needs an expiry date.', v_product_name;
+      end if;
+      if exists (
+        select 1 from public.product_variants
+        where product_id = v_product_id and lower(btrim(size)) = lower(v_size)
+      ) then
+        raise exception 'Product "%" already has that size.', v_product_name;
+      end if;
+
+      insert into public.product_variants (
+        product_id, size, additional_price, supplier_price, sku, expiry_date
+      ) values (
+        v_product_id, v_size, v_price - v_min_price,
+        round(v_price / 1.30, 2),
+        'PGB-' || upper(substr(replace(v_product_id::text, '-', ''), 1, 6)) || '-' ||
+          upper(substr(md5(v_size || '|' || random()::text), 1, 8)),
+        v_expiry
+      )
+      returning variant_id into v_variant_id;
+
+      insert into public.inventory (variant_id, stock_quantity, reorder_level)
+      values (v_variant_id, greatest(coalesce((v_variant->>'stock')::integer, 0), 0), 10);
+    end loop;
+  end loop;
+
+  return v_brand_id;
+end;
+$fn$;
+
+-- Supplier onboarding: one atomic call creates the supplier and its first
+-- brand, products, and variants.
+create or replace function public.create_supplier_catalog(
+  p_name text,
+  p_contact_name text,
+  p_contact_email text,
+  p_phone text,
+  p_address text,
+  p_brand_name text,
+  p_products jsonb
+) returns uuid
+language plpgsql security definer set search_path = public
+as $fn$
+declare
+  v_supplier_id uuid;
+begin
+  if not public.has_permission('suppliers', 'create') then
+    raise exception 'You need supplier create access.';
+  end if;
+  if coalesce(btrim(p_name), '') = '' then
+    raise exception 'Supplier name is required.';
+  end if;
+
+  insert into public.suppliers (name, contact_name, contact_email, phone, address, status)
+  values (btrim(p_name), btrim(coalesce(p_contact_name, '')), btrim(coalesce(p_contact_email, '')),
+          btrim(coalesce(p_phone, '')), btrim(coalesce(p_address, '')), 'Active')
+  returning supplier_id into v_supplier_id;
+
+  perform public._create_brand_catalog(v_supplier_id, p_brand_name, p_products);
+  return v_supplier_id;
+end;
+$fn$;
+
+-- Adds another brand (and its products/variants) to an existing supplier.
+create or replace function public.create_supplier_brand(
+  p_supplier_id uuid,
+  p_brand_name text,
+  p_products jsonb
+) returns uuid
+language plpgsql security definer set search_path = public
+as $fn$
+declare
+  v_status text;
+begin
+  if not public.has_permission('suppliers', 'edit') then
+    raise exception 'You need supplier edit access.';
+  end if;
+  select status into v_status from public.suppliers where supplier_id = p_supplier_id;
+  if v_status is null then
+    raise exception 'Supplier not found.';
+  end if;
+  if v_status = 'Archived' then
+    raise exception 'Restore the supplier before adding a brand.';
+  end if;
+  return public._create_brand_catalog(p_supplier_id, p_brand_name, p_products);
+end;
+$fn$;
+
+revoke all on function public._create_brand_catalog(uuid, text, jsonb) from public, anon, authenticated;
+revoke all on function public.create_supplier_catalog(text, text, text, text, text, text, jsonb) from public, anon;
+grant execute on function public.create_supplier_catalog(text, text, text, text, text, text, jsonb) to authenticated;
+revoke all on function public.create_supplier_brand(uuid, text, jsonb) from public, anon;
+grant execute on function public.create_supplier_brand(uuid, text, jsonb) to authenticated;
 -- Activity audit trigger: records staff mutations in user_activity_log.
 --
 -- Customers are deliberately NOT audited row-by-row: their browsing, cart and
@@ -974,6 +1394,11 @@ end;
 $$;
 
 -- Purchase order creation (staff with purchases/create permission).
+-- Variant-level lines: every item names the exact variant being ordered, the
+-- product is cross-checked against it, the product's brand must belong to the
+-- selected supplier, and unit_cost is read from the hidden
+-- product_variants.supplier_price â€” the client never sends a cost, so a PO
+-- can never be booked below the supplier price.
 create or replace function public.create_purchase_order(
   p_supplier_id uuid,
   p_expected_delivery date,
@@ -986,7 +1411,11 @@ as $$
 declare
   v_order public.purchase_orders;
   v_item jsonb;
+  v_supplier_name text;
+  v_product_name text;
+  v_variant_id uuid;
   v_product_id uuid;
+  v_item_product_id uuid;
   v_quantity integer;
   v_unit_cost numeric;
   v_total numeric := 0;
@@ -996,7 +1425,9 @@ begin
     raise exception using errcode = '42501', message = 'Purchase order management access required';
   end if;
 
-  if not exists (select 1 from public.suppliers where supplier_id = p_supplier_id and status = 'Active') then
+  select name into v_supplier_name
+  from public.suppliers where supplier_id = p_supplier_id and status = 'Active';
+  if v_supplier_name is null then
     raise exception 'Select an active supplier';
   end if;
 
@@ -1004,7 +1435,7 @@ begin
     raise exception 'Purchase order items must be a list';
   end if;
   if jsonb_array_length(p_items) = 0 then
-    raise exception 'Add at least one product to the purchase order';
+    raise exception 'Add at least one variant to the purchase order';
   end if;
 
   v_po_no := 'PO-' || to_char(clock_timestamp(), 'YYYYMMDDHH24MISS') || '-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 6));
@@ -1022,23 +1453,73 @@ begin
       raise exception 'Each purchase order item must be an object';
     end if;
 
-    v_product_id := nullif(v_item ->> 'product_id', '')::uuid;
-    v_quantity := nullif(v_item ->> 'quantity', '')::integer;
-    v_unit_cost := nullif(v_item ->> 'unit_cost', '')::numeric;
-    if v_product_id is null or v_quantity is null or v_quantity <= 0 or v_unit_cost is null or v_unit_cost < 0 then
-      raise exception 'Each item requires a product, positive quantity, and non-negative unit cost';
+    v_variant_id := nullif(v_item ->> 'variant_id', '')::uuid;
+    if v_variant_id is null then
+      raise exception 'Each item requires a variant';
     end if;
-    if not exists (select 1 from public.products where product_id = v_product_id and status = 'Active') then
+
+    v_quantity := nullif(v_item ->> 'quantity', '')::integer;
+    if v_quantity is null or v_quantity <= 0 then
+      raise exception 'Each item requires a positive quantity';
+    end if;
+
+    -- The line is identified by its variant; the hidden cost comes with it.
+    select pv.product_id, pv.supplier_price
+      into v_product_id, v_unit_cost
+    from public.product_variants pv
+    where pv.variant_id = v_variant_id;
+    if v_product_id is null then
+      raise exception 'One of the selected variants no longer exists';
+    end if;
+
+    v_item_product_id := nullif(v_item ->> 'product_id', '')::uuid;
+    if v_item_product_id is not null and v_item_product_id <> v_product_id then
+      raise exception 'The selected variant does not belong to the chosen product';
+    end if;
+
+    select name into v_product_name
+    from public.products where product_id = v_product_id and status = 'Active';
+    if v_product_name is null then
       raise exception 'Purchase order products must be active';
     end if;
 
-    insert into public.purchase_order_items (purchase_order_id, product_id, quantity, unit_cost)
-    values (v_order.purchase_order_id, v_product_id, v_quantity, v_unit_cost);
+    -- Ownership is brand-based: the product's brand belongs to this supplier.
+    if not exists (
+      select 1
+      from public.products p
+      join public.brands b on b.brand_id = p.brand_id
+      where p.product_id = v_product_id and b.supplier_id = p_supplier_id
+    ) then
+      raise exception '% does not provide %', v_supplier_name, v_product_name;
+    end if;
+
+    insert into public.purchase_order_items (purchase_order_id, product_id, variant_id, quantity, unit_cost)
+    values (v_order.purchase_order_id, v_product_id, v_variant_id, v_quantity, v_unit_cost);
+
     v_total := v_total + v_quantity * v_unit_cost;
   end loop;
 
   update public.purchase_orders set total_cost = v_total where purchase_order_id = v_order.purchase_order_id returning * into v_order;
   return v_order;
+end;
+$$;
+
+-- The hidden supplier cost is not a table read: product_variants.supplier_price
+-- is revoked from anon and authenticated (grants section below), so the admin
+-- catalog fetch gets costs through this RPC, which requires purchases/view â€”
+-- guests and customers are refused. Unit costs feed the PO grand total only.
+create or replace function public.get_variant_supplier_costs(p_variant_ids uuid[])
+returns table(variant_id uuid, unit_cost numeric)
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.has_permission('purchases', 'view') then
+    raise exception using errcode = '42501', message = 'Purchase order management access required';
+  end if;
+  return query
+    select pv.variant_id, pv.supplier_price
+    from public.product_variants pv
+    where pv.variant_id = any (coalesce(p_variant_ids, '{}'::uuid[]));
 end;
 $$;
 
@@ -1214,7 +1695,7 @@ declare
 begin
   foreach v_table in array array[
     'profiles', 'brands', 'categories', 'products', 'product_variants', 'inventory',
-    'inventory_movements', 'suppliers', 'supplier_products', 'purchase_orders',
+    'inventory_movements', 'suppliers', 'purchase_orders',
     'purchase_order_items', 'orders', 'order_items', 'payments', 'recommendations',
     'customer_product_interactions', 'support_inquiries', 'support_responses'
   ] loop
@@ -1276,14 +1757,25 @@ and not exists (
 );
 
 -- Reviewer display names for the public reviews tab.
--- security_invoker = off so the view reads profiles without its RLS (self-or-admin
--- only, which would blank out every other customer's name), while exposing name
--- columns only - never email/phone/role. Used by ProductDetailPage as a second
--- query instead of embedding profiles() into product_reviews, which PostgREST
--- answers with 401 for guests.
+-- A security-definer view triggers the "Security Definer View" linter and would
+-- expose every customer's name. This product-scoped function exposes only the
+-- display-name columns for reviewers of the requested product, with a fixed
+-- empty search_path and execute restricted to storefront roles.
 drop view if exists public.review_authors;
-create or replace view public.review_authors with (security_invoker = off) as
-select user_id, first_name, last_name from public.profiles;
+create or replace function public.get_product_review_authors(p_product_id uuid)
+returns table (user_id uuid, first_name text, last_name text)
+language sql
+stable
+security definer
+set search_path = ''
+as $fn$
+  select distinct profile.user_id, profile.first_name, profile.last_name
+  from public.product_reviews review
+  join public.profiles profile on profile.user_id = review.user_id
+  join public.products product on product.product_id = review.product_id
+  where review.product_id = p_product_id
+    and product.status = 'Active';
+$fn$;
 
 -- ============================================================================
 -- 7. Storage (product images)
@@ -1316,11 +1808,12 @@ declare
 begin
   foreach v_table in array array[
     'profiles', 'brands', 'categories', 'products', 'product_variants', 'inventory',
-    'suppliers', 'supplier_products', 'purchase_orders', 'purchase_order_items',
+    'suppliers', 'purchase_orders', 'purchase_order_items',
     'orders', 'order_items', 'recommendation_rules', 'recommendations',
     'customer_product_interactions', 'user_activity_log', 'payments',
     'inventory_movements', 'cart_items', 'wishlist_items', 'user_addresses',
-    'user_payment_methods', 'support_inquiries', 'support_responses', 'product_reviews'
+    'user_payment_methods', 'support_inquiries', 'support_responses', 'product_reviews',
+    'role_permissions'
   ] loop
     execute format('alter table public.%I enable row level security', v_table);
   end loop;
@@ -1389,8 +1882,6 @@ create policy suppliers_select on public.suppliers for select to authenticated u
 create policy suppliers_insert on public.suppliers for insert to authenticated with check (public.has_permission('suppliers', 'create'));
 create policy suppliers_update on public.suppliers for update to authenticated using (public.has_permission('suppliers', 'edit')) with check (public.has_permission('suppliers', 'edit'));
 create policy suppliers_delete on public.suppliers for delete to authenticated using (public.has_permission('suppliers', 'delete'));
-create policy supplier_products_select on public.supplier_products for select to authenticated using (public.has_permission('suppliers', 'view'));
-create policy supplier_products_write on public.supplier_products for all to authenticated using (public.has_permission('suppliers', 'edit')) with check (public.has_permission('suppliers', 'edit'));
 
 -- Purchasing.
 create policy purchase_orders_select on public.purchase_orders for select to authenticated using (public.has_permission('purchases', 'view'));
@@ -1505,18 +1996,26 @@ grant usage on schema public to anon, authenticated;
 grant select on public.brands, public.categories, public.products, public.product_variants, public.inventory to anon;
 grant select on public.recommendation_rules to anon;
 grant insert on public.support_inquiries to anon;
-grant usage, select on sequence public.support_inquiries_id_seq to anon;
--- Embedded by the public catalog query (products -> supplier_products -> suppliers).
+-- support_inquiries uses an identity column on a fresh schema, but databases
+-- created from the original bigserial schema still need the sequence grant.
+do $$
+begin
+  if to_regclass('public.support_inquiries_id_seq') is not null then
+    grant usage, select on sequence public.support_inquiries_id_seq to anon;
+  end if;
+end;
+$$;
 -- PostgREST answers 401 "permission denied for table" with no table grant even
 -- when RLS would hide every row; the supplier policies stay staff-only, so guests
 -- still read zero rows and no supplier contact data leaks.
-grant select on public.supplier_products, public.suppliers to anon;
+grant select on public.suppliers to anon;
 -- Guests submit support tickets from the chat bubble. PostgREST needs SELECT to
 -- return an insert representation; support_inquiries_select is authenticated-only,
 -- so guests can insert but read nothing back.
 grant select on public.support_inquiries to anon;
 -- Reviewer display names for the public reviews tab (name columns only).
-grant select on public.review_authors to anon, authenticated;
+revoke all on function public.get_product_review_authors(uuid) from public;
+grant execute on function public.get_product_review_authors(uuid) to anon, authenticated;
 
 -- Profiles: column-scoped self-service.
 revoke all on public.profiles from anon, authenticated;
@@ -1526,7 +2025,7 @@ grant update (first_name, last_name, phone, birthday, skin_profile) on public.pr
 -- Authenticated catalog & commerce access.
 grant select on public.brands, public.categories, public.products, public.product_variants, public.inventory to authenticated;
 grant select, insert, update, delete on public.products, public.product_variants, public.inventory to authenticated;
-grant select, insert, update, delete on public.brands, public.categories, public.suppliers, public.supplier_products,
+grant select, insert, update, delete on public.brands, public.categories, public.suppliers,
   public.purchase_orders, public.purchase_order_items, public.orders, public.order_items, public.payments,
   public.inventory_movements to authenticated;
 grant select on public.recommendation_rules to authenticated;
@@ -1536,10 +2035,140 @@ grant select, insert, update, delete on public.cart_items, public.wishlist_items
 grant select, insert, update on public.support_inquiries to authenticated;
 grant select, insert on public.support_responses to authenticated;
 grant select on public.product_reviews to anon, authenticated;
-grant usage, select on sequence public.support_inquiries_id_seq, public.support_responses_id_seq, public.user_activity_log_id_seq to authenticated;
+do $$
+declare
+  v_sequence text;
+begin
+  foreach v_sequence in array array[
+    'support_inquiries_id_seq', 'support_responses_id_seq', 'user_activity_log_id_seq'
+  ] loop
+    if to_regclass('public.' || v_sequence) is not null then
+      execute format('grant usage, select on sequence public.%I to authenticated', v_sequence);
+    end if;
+  end loop;
+end;
+$$;
+
+-- The supplier cost column is not readable over REST. The two grants above
+-- hand product_variants out whole, so they are narrowed to every column except
+-- supplier_price: the storefront keeps selling, admins keep saving costs
+-- (their INSERT/UPDATE privileges are untouched), and only
+-- get_variant_supplier_costs (purchases/view) returns a cost.
+revoke select on public.product_variants from anon, authenticated;
+grant select (variant_id, product_id, size, additional_price, sku, images, expiry_date)
+  on public.product_variants to anon, authenticated;
 
 -- Checkout runs only through the place_order RPC.
 revoke insert on public.orders, public.order_items, public.payments, public.inventory_movements from authenticated;
+
+-- Dynamic storefront search suggestions. Frequent products are per-customer,
+-- with a global fallback for guests or customers without interaction history.
+create or replace function public.get_search_suggestions(p_limit integer default 5)
+returns table (
+  section text,
+  product_id uuid,
+  name text,
+  brand_name text,
+  image text,
+  tags text[],
+  score bigint
+)
+language plpgsql
+security definer
+set search_path = public
+as $fn$
+declare
+  v_limit integer := least(greatest(coalesce(p_limit, 5), 1), 10);
+  v_user uuid := auth.uid();
+  v_has_history boolean := false;
+begin
+  if v_user is not null then
+    select exists (
+      select 1
+      from public.customer_product_interactions
+      where user_id = v_user
+    ) into v_has_history;
+  end if;
+
+  if v_has_history then
+    return query
+    select
+      'frequent'::text,
+      p.product_id,
+      p.name,
+      b.name,
+      coalesce(nullif(btrim(p.image), ''), p.images[1], ''),
+      p.tags,
+      count(*)::bigint
+    from public.customer_product_interactions interaction
+    join public.products p on p.product_id = interaction.product_id
+    join public.brands b on b.brand_id = p.brand_id
+    where interaction.user_id = v_user
+      and p.status = 'Active'
+      and exists (
+        select 1
+        from public.product_variants variant
+        where variant.product_id = p.product_id
+          and (variant.expiry_date is null or variant.expiry_date > current_date + 60)
+      )
+    group by p.product_id, p.name, b.name, p.image, p.images
+    order by count(*) desc, p.name
+    limit v_limit;
+  else
+    return query
+    select
+      'frequent'::text,
+      p.product_id,
+      p.name,
+      b.name,
+      coalesce(nullif(btrim(p.image), ''), p.images[1], ''),
+      p.tags,
+      count(*)::bigint
+    from public.customer_product_interactions interaction
+    join public.products p on p.product_id = interaction.product_id
+    join public.brands b on b.brand_id = p.brand_id
+    where p.status = 'Active'
+      and exists (
+        select 1
+        from public.product_variants variant
+        where variant.product_id = p.product_id
+          and (variant.expiry_date is null or variant.expiry_date > current_date + 60)
+      )
+    group by p.product_id, p.name, b.name, p.image, p.images, p.tags
+    order by count(*) desc, p.name
+    limit v_limit;
+  end if;
+
+  return query
+  select
+    'top_selling'::text,
+    p.product_id,
+    p.name,
+    b.name,
+    coalesce(nullif(btrim(p.image), ''), p.images[1], ''),
+    p.tags,
+    sum(item.quantity)::bigint
+  from public.order_items item
+  join public.orders o on o.order_id = item.order_id
+  join public.product_variants variant on variant.variant_id = item.variant_id
+  join public.products p on p.product_id = variant.product_id
+  join public.brands b on b.brand_id = p.brand_id
+  where o.status <> 'Cancelled'
+    and p.status = 'Active'
+    and exists (
+      select 1
+      from public.product_variants sellable
+      where sellable.product_id = p.product_id
+        and (sellable.expiry_date is null or sellable.expiry_date > current_date + 60)
+    )
+    group by p.product_id, p.name, b.name, p.image, p.images, p.tags
+    order by sum(item.quantity) desc, p.name
+    limit v_limit;
+end;
+$fn$;
+
+revoke all on function public.get_search_suggestions(integer) from public;
+grant execute on function public.get_search_suggestions(integer) to anon, authenticated;
 
 -- Functions exposed to the app.
 grant execute on function public.place_order(uuid, jsonb, numeric, numeric, numeric, numeric, text, text, text, text, text, text, text, text) to authenticated;
@@ -1552,6 +2181,7 @@ grant execute on function public.get_staff_activity() to authenticated;
 grant execute on function public.get_customer_activity() to authenticated;
 grant execute on function public.set_customer_account_status(uuid, text) to authenticated;
 grant execute on function public.get_customer_segment(uuid) to authenticated;
+grant execute on function public.get_variant_supplier_costs(uuid[]) to authenticated;
 
 -- The same RPCs default to EXECUTE for PUBLIC on creation; every one above is
 -- only ever called from a signed-in screen (checkout, activity log, admin pages),
@@ -1564,6 +2194,12 @@ revoke execute on function public.get_staff_activity() from public, anon;
 revoke execute on function public.get_customer_activity() from public, anon;
 revoke execute on function public.get_customer_segment(uuid) from public, anon;
 revoke execute on function public.set_customer_account_status(uuid, text) from public, anon;
+revoke execute on function public.get_variant_supplier_costs(uuid[]) from public, anon;
+-- RBAC: role_permissions is readable only by superuser/security-definer paths;
+-- clients receive the matrix exclusively through get_my_permissions().
+revoke all on table public.role_permissions from public, anon, authenticated;
+revoke execute on function public.get_my_permissions() from public, anon;
+grant execute on function public.get_my_permissions() to authenticated;
 
 -- Discount/sale expiration: reverts every product whose sale window has ended
 -- (price <- original_price, sale_price + discount_* cleared) and RETURNS the
@@ -1614,7 +2250,13 @@ grant select on public.product_sales, public.sales_by_month, public.underperform
 grant usage on schema public to service_role;
 grant select, update on public.profiles to service_role;
 grant insert on public.user_activity_log to service_role;
-grant usage, select on sequence public.user_activity_log_id_seq to service_role;
+do $$
+begin
+  if to_regclass('public.user_activity_log_id_seq') is not null then
+    grant usage, select on sequence public.user_activity_log_id_seq to service_role;
+  end if;
+end;
+$$;
 
 commit;
 
@@ -1638,31 +2280,35 @@ commit;
 -- src/ was compared against this schema file. This file has also been executed
 -- against the live database (project lvtlehesxweckggyemnm), so the schema file
 -- and the database are in sync.
--- Result: MATCH — no schema drift detected. All tables, views, RPCs, and the
+-- Result: MATCH â€” no schema drift detected. All tables, views, RPCs, and the
 -- manage-user Edge Function used by the app are defined below.
 --
--- TABLES used by the app (all 25 present):
+-- TABLES used by the app (all 26 present):
 --   profiles, brands, categories, products, product_variants, inventory,
---   suppliers, supplier_products, purchase_orders, purchase_order_items,
+--   suppliers, purchase_orders, purchase_order_items,
 --   orders, order_items, payments, inventory_movements, cart_items,
 --   wishlist_items, user_addresses, user_payment_methods,
 --   recommendation_rules, recommendations, customer_product_interactions,
---   user_activity_log, support_inquiries, support_responses, product_reviews
+--   user_activity_log, support_inquiries, support_responses, product_reviews,
+--   role_permissions (RBAC matrix read only via has_permission / get_my_permissions)
 --
 -- SEQUENCES used by the app:
 --   document_no_seq -> handle_new_user() stamps profiles.document_number
 --                      (shown on the Customers page and written to the
 --                      inventory ledger as inventory_movements.user_document)
 --
--- VIEWS used by the app (all 4 present):
---   product_sales, sales_by_month, underperforming_products,
---   review_authors      -> src/pages/customer/ProductDetailPage.tsx (reviewer
---                           names on the public Reviews tab; name columns only)
+-- VIEWS used by the app (all 3 present):
+--   product_sales, sales_by_month, underperforming_products
+--
+-- RPCS used by the app for public reviewer names:
+--   get_product_review_authors(uuid) -> src/pages/customer/ProductDetailPage.tsx
+--                           (product-scoped reviewer names; name columns only)
 --
 -- ANONYMOUS (signed-out) ACCESS - what the storefront touches as anon:
 --   SELECT   products, brands, categories, product_variants, inventory,
---            recommendation_rules, supplier_products, suppliers,
---            support_inquiries, review_authors
+--            recommendation_rules, suppliers,
+--            support_inquiries
+--   EXECUTE  get_product_review_authors(uuid)
 --   INSERT   support_inquiries (only with user_id is null), plus USAGE on
 --            support_inquiries_id_seq
 --   PostgREST answers 401 "permission denied for table X" whenever a table-level
@@ -1683,6 +2329,10 @@ commit;
 --   expire_discounts       -> src/lib/catalog.ts (expireEndedDiscounts); fired by
 --                             src/pages/admin/AdminDashboard.tsx on mount + every 30s
 --   log_customer_activity  -> src/components/FloatingChat.tsx (ai.chat only)
+--   get_my_permissions     -> src/context/AuthContext.tsx (loadProfile): returns
+--                             {module: [actions]} so the frontend menus, route
+--                             guards and login landing route use the same matrix
+--                             that has_permission() enforces in RLS/RPCs
 --   touch_customer_activity-> defined; not yet called by frontend
 --
 -- RPCs that exist for database triggers rather than frontend calls:

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, Users, Package, AlertTriangle, Brain, ArrowUpRight } from 'lucide-react';
 import { Card, Badge, useToast, ToastContainer } from '../../components/ui';
@@ -19,7 +20,7 @@ const categoryColors = ['#B5697A', '#5B8C85', '#D4944C', '#6F82A8', '#8B6B9E', '
 export default function AdminDashboard() {
   const { user } = useAuth();
   const isSuperAdmin = user?.role === 'super_admin';
-  const [dashboard, setDashboard] = useState<any>({ salesData: [], topProducts: [], categoryData: [], totalSales: 0, customerCount: 0, activeCustomerCount: 0, productCount: 0, supplierCount: 0, inventoryUnits: 0, lowStock: 0 });
+  const [dashboard, setDashboard] = useState<any>({ salesData: [], topProducts: [], categoryData: [], expiringVariants: [], totalSales: 0, customerCount: 0, activeCustomerCount: 0, productCount: 0, supplierCount: 0, inventoryUnits: 0, lowStock: 0 });
   const [error, setError] = useState<string | null>(null);
   const { toasts, add: addToast, remove } = useToast();
   // useToast() returns a fresh `add` each render; keep it in a ref so the
@@ -186,6 +187,59 @@ export default function AdminDashboard() {
             </div>
           </Card>
         </div>
+        {/* Expiry watch — deep links into the Inventory filter */}
+        <Card className="p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="font-semibold text-sm">Expiry Watch</h2>
+              <p className="text-xs text-[var(--muted-foreground)] mt-0.5">Variants expiring within 60 days or already expired — hidden from customers</p>
+            </div>
+            <Badge variant={dashboard.expiringVariants.length ? 'warning' : 'success'}>
+              {dashboard.expiringVariants.length} flagged
+            </Badge>
+          </div>
+          {dashboard.expiringVariants.length === 0 ? (
+            <p className="py-6 text-center text-xs text-[var(--muted-foreground)]">No variants are near expiry or expired.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase text-[var(--muted-foreground)]">
+                    {['Product', 'Variant', 'Expiry', 'Status', 'Stock', ''].map(header => (
+                      <th key={header} className="border-b border-[var(--border)] py-2 pr-3 whitespace-nowrap">{header}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {dashboard.expiringVariants.slice(0, 8).map((row: any) => (
+                    <tr key={row.id} className="border-b border-[var(--border)] last:border-0">
+                      <td className="py-2 pr-3 font-medium max-w-[220px] truncate">{row.product}</td>
+                      <td className="py-2 pr-3 text-[var(--muted-foreground)]">{row.variant}</td>
+                      <td className="py-2 pr-3 whitespace-nowrap">{row.expiryLabel}</td>
+                      <td className="py-2 pr-3"><Badge variant={row.badge}>{row.status}</Badge></td>
+                      <td className="py-2 pr-3 font-mono">{row.stock}</td>
+                      <td className="py-2 text-right">
+                        <Link
+                          to={`/admin/inventory?filter=${row.filter}`}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--primary)] hover:underline whitespace-nowrap"
+                        >
+                          Manage <ArrowUpRight size={12} />
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {dashboard.expiringVariants.length > 8 && (
+                <div className="mt-3 text-right">
+                  <Link to="/admin/inventory?filter=near-expiry" className="text-xs font-semibold text-[var(--primary)] hover:underline">
+                    View all {dashboard.expiringVariants.length} flagged variants
+                  </Link>
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
       </div>
     </AdminSidebar>
   );

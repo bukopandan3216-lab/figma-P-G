@@ -8,6 +8,7 @@ import type { Product } from '../data/products';
 import { useCatalog } from '../context/CatalogContext';
 import { Badge, StarRating, Button } from './ui';
 import { safeImage } from '../lib/image';
+import { defaultVariantSelection, isVariantOptionAvailable, resolveVariant } from '../lib/variant';
 import { supabase } from '../lib/supabase';
 
 interface Props {
@@ -91,10 +92,22 @@ export default function ProductModal({ product, onClose }: Props) {
     };
   }, [product, onClose]);
 
+  // The gallery follows the selector's effective choice (explicit pick, else
+  // the group's first option); variants without photos fall back to the
+  // product's own gallery.
+  const effectiveVariantLabel = product ? resolveVariant(product, selectedVariants).label || '' : '';
+  useEffect(() => { setActiveImg(0); }, [effectiveVariantLabel]);
+
   if (!product) return null;
 
-  const imgs = (product.images?.length ? product.images.filter(Boolean) : [product.image]).filter(Boolean);
+  const defaultSelection = defaultVariantSelection(product);
+
+  const variantPhotos = (effectiveVariantLabel ? product.variantImages?.[effectiveVariantLabel] : undefined) || [];
+  const imgs = (variantPhotos.length ? variantPhotos : product.images?.length ? product.images.filter(Boolean) : [product.image]).filter(Boolean);
   const safeImgs = imgs.length ? imgs.map(img => safeImage(img, product.name)) : [safeImage(product.image, product.name)];
+  const selectedVariant = resolveVariant(product, selectedVariants);
+  const canBuy = product.inStock && selectedVariant.valid && selectedVariant.stock > 0;
+  const variantSavings = selectedVariant.originalPrice != null ? selectedVariant.originalPrice - selectedVariant.price : 0;
   const wished = wishlist.includes(product.id);
   const averageReviewRating = reviews.length
     ? reviews.reduce((total, review) => total + review.rating, 0) / reviews.length
@@ -208,27 +221,27 @@ export default function ProductModal({ product, onClose }: Props) {
 
               {/* Price */}
               <div className="flex items-baseline gap-2 mb-4">
-                <span className="text-3xl font-bold">₱{product.price.toFixed(2)}</span>
-                {product.originalPrice != null && (
-                  <span className="text-base text-[var(--muted-foreground)] line-through">₱{product.originalPrice.toFixed(2)}</span>
+                <span className="text-3xl font-bold">₱{selectedVariant.price.toFixed(2)}</span>
+                {selectedVariant.originalPrice != null && (
+                  <span className="text-base text-[var(--muted-foreground)] line-through">₱{selectedVariant.originalPrice.toFixed(2)}</span>
                 )}
-                {product.originalPrice != null && product.originalPrice > product.price && (
-                  <Badge variant="danger">Save ₱{(product.originalPrice - product.price).toFixed(2)}</Badge>
+                {variantSavings > 0 && (
+                  <Badge variant="danger">Save ₱{variantSavings.toFixed(2)}</Badge>
                 )}
               </div>
 
               {/* Action buttons */}
               <div className="flex gap-2 mb-4">
                 <button
-                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })}
-                  disabled={!product.inStock}
+                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: selectedVariant.price, image: product.image, stock: selectedVariant.stock, inStock: canBuy, variantId: selectedVariant.variantId, variantLabel: selectedVariant.label })}
+                  disabled={!canBuy}
                   className="flex-1 border-2 border-[var(--primary)] text-[var(--primary)] font-semibold rounded-[var(--radius)] py-2.5 text-sm hover:bg-[var(--rose-light)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   <ShoppingBag size={15} /> Add to Cart
                 </button>
                 <button
-                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: product.price, image: product.image, stock: product.stock, inStock: product.inStock })}
-                  disabled={!product.inStock}
+                  onClick={() => addToCart({ id: product.id, name: product.name, brand: product.brand, price: selectedVariant.price, image: product.image, stock: selectedVariant.stock, inStock: canBuy, variantId: selectedVariant.variantId, variantLabel: selectedVariant.label })}
+                  disabled={!canBuy}
                   className="flex-1 bg-[var(--primary)] text-white font-semibold rounded-[var(--radius)] py-2.5 text-sm hover:bg-[#9E5569] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Buy it now
@@ -245,18 +258,24 @@ export default function ProductModal({ product, onClose }: Props) {
               {product.variants?.map(variant => (
                 <div key={variant.label} className="mb-4">
                   <div className="text-xs font-semibold mb-2 text-[var(--muted-foreground)] uppercase tracking-wide">
-                    {variant.label}: <span className="text-[var(--foreground)] font-medium normal-case tracking-normal">{selectedVariants[variant.label] || variant.options[0]}</span>
+                    {variant.label}: <span className="text-[var(--foreground)] font-medium normal-case tracking-normal">{selectedVariants[variant.label] || defaultSelection[variant.label] || variant.options[0]}</span>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {variant.options.map(opt => (
-                      <button
-                        key={opt}
-                        onClick={() => setSelectedVariants(prev => ({ ...prev, [variant.label]: opt }))}
-                        className={`px-3 py-1.5 rounded-full text-xs border-2 transition-all font-medium ${(selectedVariants[variant.label] || variant.options[0]) === opt ? 'border-[var(--primary)] bg-[var(--rose-light)] text-[var(--primary)]' : 'border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--primary)]/60'}`}
-                      >
-                        {opt}
-                      </button>
-                    ))}
+                    {variant.options.map(opt => {
+                      const available = isVariantOptionAvailable(product, selectedVariants, variant.label, opt);
+                      const active = (selectedVariants[variant.label] || defaultSelection[variant.label] || variant.options[0]) === opt;
+                      return (
+                        <button
+                          key={opt}
+                          onClick={() => setSelectedVariants(prev => ({ ...prev, [variant.label]: opt }))}
+                          disabled={!available}
+                          title={available ? undefined : 'This combination is not available'}
+                          className={`px-3 py-1.5 rounded-full text-xs border-2 transition-all font-medium ${active ? 'border-[var(--primary)] bg-[var(--rose-light)] text-[var(--primary)]' : available ? 'border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--primary)]/60' : 'border-[var(--border)] text-[var(--muted-foreground)] opacity-40 line-through cursor-not-allowed'}`}
+                        >
+                          {opt}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -268,9 +287,9 @@ export default function ProductModal({ product, onClose }: Props) {
               </div>
 
               {/* Stock */}
-              <div className={`flex items-center gap-2 text-sm mb-4 ${product.inStock ? product.stock < 10 ? 'text-amber-600' : 'text-emerald-600' : 'text-red-600'}`}>
-                {product.inStock ? (
-                  <><Check size={14} />{product.stock < 10 ? `Only ${product.stock} left in stock — order soon!` : `In Stock (${product.stock} units)`}</>
+              <div className={`flex items-center gap-2 text-sm mb-4 ${canBuy ? selectedVariant.stock < 10 ? 'text-amber-600' : 'text-emerald-600' : 'text-red-600'}`}>
+                {canBuy ? (
+                  <><Check size={14} />{selectedVariant.stock < 10 ? `Only ${selectedVariant.stock} left in stock — order soon!` : `In Stock (${selectedVariant.stock} units)`}</>
                 ) : (
                   <><X size={14} />Currently out of stock</>
                 )}

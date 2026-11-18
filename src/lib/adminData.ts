@@ -1,21 +1,28 @@
 import { supabase } from './supabase';
+import { NEAR_EXPIRY_DAYS, expiryStatus, expiryBadgeVariant, formatExpiryDate } from './expiry';
 
 export async function fetchSuppliers() {
   const { data, error } = await supabase
     .from('suppliers')
-    .select('id:supplier_id, name, contact_name, contact_email, phone, address, status, created_at, supplier_products(product_id, products(name, brands(name), product_variants(id:variant_id))), purchase_orders(id:purchase_order_id, po_no, status, created_at, total_cost)')
+    .select('id:supplier_id, name, contact_name, contact_email, phone, address, status, created_at, brands(brand_id, name, products(id:product_id, name, product_variants(id:variant_id))), purchase_orders(id:purchase_order_id, po_no, status, created_at, total_cost)')
     .order('created_at', { ascending: false });
 
   if (error) throw error;
 
   return (data || []).map((row: any) => {
-    const links = row.supplier_products || [];
-    const uniqueProductIds = new Set(links.map((entry: any) => entry.product_id).filter(Boolean));
-    const productNames = Array.from(new Set(links.map((entry: any) => entry.products?.name).filter(Boolean))) as string[];
-    // Supplier audit: brands carried and variants available come from the
-    // supplier -> products -> brands / product_variants chain.
-    const brandNames = Array.from(new Set(links.map((entry: any) => entry.products?.brands?.name).filter(Boolean))) as string[];
-    const variantCount = links.reduce((total: number, entry: any) => total + ((entry.products?.product_variants as any[])?.length || 0), 0);
+    // Ownership chain: supplier -> brands -> products -> variants.
+    const brands = row.brands || [];
+    const productIds = new Set<string>();
+    const productNames = new Set<string>();
+    let variantCount = 0;
+    for (const brand of brands) {
+      for (const product of brand.products || []) {
+        if (product.id) productIds.add(product.id);
+        if (product.name) productNames.add(product.name);
+        variantCount += (product.product_variants || []).length;
+      }
+    }
+    const brandNames = brands.map((brand: any) => brand.name).filter(Boolean) as string[];
     const purchaseOrders = (row.purchase_orders || [])
       .slice()
       .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
@@ -34,9 +41,9 @@ export async function fetchSuppliers() {
       address: row.address || '',
       email: row.contact_email || '',
       phone: row.phone || '',
-      products: uniqueProductIds.size,
-      productIds: Array.from(uniqueProductIds),
-      productNames,
+      products: productIds.size,
+      productIds: Array.from(productIds),
+      productNames: Array.from(productNames),
       brands: brandNames,
       brandCount: brandNames.length,
       variantCount,
@@ -45,6 +52,18 @@ export async function fetchSuppliers() {
       purchaseOrders,
     };
   });
+}
+
+export type CategoryOption = { id: string; name: string };
+
+/** Real category UUIDs for catalogue editors (never the storefront slugs). */
+export async function fetchCategoryOptions(): Promise<CategoryOption[]> {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('id:category_id, name')
+    .order('name');
+  if (error) throw error;
+  return ((data || []) as CategoryOption[]).filter(category => category.id && category.name);
 }
 
 export type SupplierInput = {
@@ -70,15 +89,80 @@ export async function upsertSupplier(input: SupplierInput, supplierId?: string) 
   return supplierId || (result.data as any)?.id || '';
 }
 
-/** Replaces the catalogue this supplier provides (supplier_products junction table). */
-export async function setSupplierProducts(supplierId: string, productIds: string[]) {
-  const { error: deleteError } = await supabase.from('supplier_products').delete().eq('supplier_id', supplierId);
-  if (deleteError) throw deleteError;
-  if (!productIds.length) return;
-  const { error: insertError } = await supabase
-    .from('supplier_products')
-    .insert(productIds.map(product_id => ({ supplier_id: supplierId, product_id })));
-  if (insertError) throw insertError;
+export type SupplierCatalogVariantInput = {
+  size: string;
+  price: string;
+  stock: string;
+  expiryDate: string;
+};
+
+export type SupplierCatalogProductInput = {
+  name: string;
+  categoryId: string;
+  description: string;
+  tags: string[];
+  variants: SupplierCatalogVariantInput[];
+};
+
+/**
+ * Onboards a supplier and its catalogue in one transaction: the supplier owns
+ * one unique brand, the brand owns new products, and each product owns its
+ * size variants. The RPC rejects any brand, product, or variant that already
+ * exists anywhere in the catalogue.
+ */
+export async function createSupplierCatalog(input: {
+  supplier: SupplierInput;
+  brandName: string;
+  products: SupplierCatalogProductInput[];
+}) {
+  const { data, error } = await supabase.rpc('create_supplier_catalog', {
+    p_name: input.supplier.name.trim(),
+    p_contact_name: input.supplier.contactName.trim(),
+    p_contact_email: input.supplier.email.trim(),
+    p_phone: input.supplier.phone.trim(),
+    p_address: input.supplier.address.trim(),
+    p_brand_name: input.brandName.trim(),
+    p_products: input.products.map(product => ({
+      name: product.name.trim(),
+      category_id: product.categoryId,
+      description: product.description.trim(),
+      tags: product.tags,
+      variants: product.variants.map(variant => ({
+        size: variant.size.trim(),
+        price: Number(variant.price),
+        stock: Number(variant.stock || 0),
+        expiry_date: variant.expiryDate,
+      })),
+    })),
+  });
+  if (error) throw error;
+  return data as string;
+}
+
+/** Adds another unique brand (with its products and variants) to a supplier. */
+export async function createSupplierBrand(input: {
+  supplierId: string;
+  brandName: string;
+  products: SupplierCatalogProductInput[];
+}) {
+  const { data, error } = await supabase.rpc('create_supplier_brand', {
+    p_supplier_id: input.supplierId,
+    p_brand_name: input.brandName.trim(),
+    p_products: input.products.map(product => ({
+      name: product.name.trim(),
+      category_id: product.categoryId,
+      description: product.description.trim(),
+      tags: product.tags,
+      variants: product.variants.map(variant => ({
+        size: variant.size.trim(),
+        price: Number(variant.price),
+        stock: Number(variant.stock || 0),
+        expiry_date: variant.expiryDate,
+      })),
+    })),
+  });
+  if (error) throw error;
+  return data as string;
 }
 
 export async function setSupplierStatus(supplierId: string, status: 'Active' | 'Inactive' | 'Archived') {
@@ -96,22 +180,78 @@ export async function fetchPurchaseProducts() {
   return data || [];
 }
 
+// ─── Purchase order catalog: supplier → brand → product → variant ────────────
+// One fetch feeds the whole cascade on the Purchases page. Every active
+// product comes with its owning supplier, its brand, and its variants.
+// `supplier_price` is NOT selectable over REST (revoked for anon and
+// authenticated), so costs arrive from the purchases/view-gated RPC
+// `get_variant_supplier_costs` and only feed the modal's running grand total —
+// they are never rendered per line and never posted back (the database reads
+// the cost itself when the order is created).
+export type PurchaseCatalogVariant = { id: string; label: string; unitCost: number };
+export type PurchaseCatalogProduct = {
+  id: string;
+  name: string;
+  brandId: string;
+  brandName: string;
+  supplierId: string;
+  variants: PurchaseCatalogVariant[];
+};
+
+export async function fetchPurchaseCatalog(): Promise<PurchaseCatalogProduct[]> {
+  const { data, error } = await supabase
+    .from('products')
+    .select('id:product_id, name, status, brand_id, brands(name, supplier_id), product_variants(id:variant_id, size, sku)')
+    .eq('status', 'Active')
+    .order('name');
+  if (error) throw error;
+
+  const products = ((data || []) as any[])
+    .map((row): PurchaseCatalogProduct => ({
+      id: row.id,
+      name: row.name,
+      brandId: row.brand_id || '',
+      brandName: row.brands?.name || '',
+      supplierId: row.brands?.supplier_id || '',
+      variants: (row.product_variants || []).map((variant: any) => ({
+        id: variant.id,
+        label: variant.size?.trim() || variant.sku || 'Variant',
+        unitCost: 0,
+      })),
+    }))
+    .filter(product => product.brandId && product.variants.length > 0);
+
+  const variantIds = products.flatMap(product => product.variants.map(variant => variant.id));
+  if (!variantIds.length) return products;
+
+  const { data: costs, error: costError } = await supabase.rpc('get_variant_supplier_costs', { p_variant_ids: variantIds });
+  if (costError) throw costError;
+  const costByVariant = new Map<string, number>(
+    ((costs || []) as any[]).map((row: any) => [row.variant_id as string, Number(row.unit_cost || 0)]),
+  );
+  for (const product of products) {
+    product.variants = product.variants.map(variant => ({ ...variant, unitCost: costByVariant.get(variant.id) ?? 0 }));
+  }
+  return products;
+}
+
 export async function createPurchaseOrder(input: {
   supplierId: string;
   expectedDelivery: string;
   paymentTerms: string;
   notes: string;
-  items: { productId: string; quantity: number; unitCost: number }[];
+  items: { productId: string; variantId: string; quantity: number }[];
 }) {
   const { data, error } = await supabase.rpc('create_purchase_order', {
     p_supplier_id: input.supplierId,
     p_expected_delivery: input.expectedDelivery || null,
     p_payment_terms: input.paymentTerms.trim(),
     p_notes: input.notes.trim(),
+    // No unit_cost is sent: the RPC reads the hidden supplier price itself.
     p_items: input.items.map(item => ({
       product_id: item.productId,
+      variant_id: item.variantId,
       quantity: item.quantity,
-      unit_cost: item.unitCost,
     })),
   });
   if (error) throw error;
@@ -130,16 +270,21 @@ export async function receivePurchaseOrder(purchaseOrderId: string, notes?: stri
 
 export async function fetchPurchases() {  const { data, error } = await supabase
     .from('purchase_orders')
-    .select('id:purchase_order_id, po_no, created_at, expected_delivery, total_cost, status, created_by, profiles:created_by(first_name, last_name, email), suppliers(name), purchase_order_items(quantity, unit_cost, products(name))')
+    .select('id:purchase_order_id, po_no, created_at, expected_delivery, total_cost, status, created_by, profiles:created_by(first_name, last_name, email), suppliers(name), purchase_order_items(quantity, products(name), product_variants(size))')
     .order('created_at', { ascending: false });
 
   if (error) throw error;
 
   return (data || []).map((row: any) => {
     const itemCount = (row.purchase_order_items || []).reduce((sum: number, item: any) => sum + Number(item.quantity || 0), 0);
-    const productNames = (row.purchase_order_items || [])
-      .map((item: any) => item.products?.name)
-      .filter((name: string | undefined) => Boolean(name));
+    // Lines are variant-level now: "100ml ×20".
+    const lines = (row.purchase_order_items || [])
+      .map((item: any) => {
+        const variantLabel = item.product_variants?.size?.trim() || '';
+        const name = item.products?.name;
+        return name ? `${name}${variantLabel ? ` (${variantLabel})` : ''} ×${Number(item.quantity || 0)}` : null;
+      })
+      .filter((line: string | null): line is string => Boolean(line));
     const creator = row.profiles as { first_name?: string; last_name?: string; email?: string } | null;
     const creatorName = creator
       ? `${creator.first_name || ''} ${creator.last_name || ''}`.trim()
@@ -155,7 +300,7 @@ export async function fetchPurchases() {  const { data, error } = await supabase
       items: itemCount,
       total: `₱${Number(row.total_cost || 0).toFixed(2)}`,
       status: row.status,
-      productSummary: productNames.length ? productNames.slice(0, 2).join(', ') + (productNames.length > 2 ? ' + more' : '') : 'No items listed',
+      productSummary: lines.length ? lines.slice(0, 2).join(', ') + (lines.length > 2 ? ' + more' : '') : 'No items listed',
     };
   });
 }
@@ -250,12 +395,12 @@ export async function fetchProductSales() {
 export async function fetchAdminUsers() {
   // Customers are managed on their own (and in customer accounts), so this
   // page only lists staff and administrator accounts.
-  const { data, error } = await supabase.from('profiles')
-    .select('id:user_id, first_name, last_name, email, role, created_at')
-    .neq('role', 'customer')
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  return (data || []).map(row => ({ id: row.id, name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed user', email: row.email || '', role: row.role, createdAt: row.created_at }));
+     const { data, error } = await supabase.from('profiles')
+       .select('id:user_id, first_name, last_name, email, role, account_status, created_at')
+       .neq('role', 'customer')
+       .order('created_at', { ascending: false });
+     if (error) throw error;
+     return (data || []).map(row => ({ id: row.id, name: `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed user', email: row.email || '', role: row.role, accountStatus: row.account_status || 'Active', createdAt: row.created_at }));
 }
 
 export async function fetchRecommendationRules() {
@@ -265,33 +410,43 @@ export async function fetchRecommendationRules() {
 }
 
 export async function fetchDashboardData() {
-  const monthlyQuery = supabase.from('sales_by_month').select('*').order('month_date');
-  const productSalesQuery = supabase.from('product_sales').select('id:product_id, name, category_id, category_name, revenue, units_sold, stock').order('revenue', { ascending: false });
-  const ordersQuery = supabase.from('orders').select('total_amount, status');
-  const inventoryQuery = supabase.from('inventory').select('stock_quantity');
-  const lowStockQuery = supabase.from('inventory').select('variant_id', { count: 'exact', head: true }).lt('stock_quantity', 10);
-  const [
-    { data: monthly, error: monthlyError },
-    { data: productSales, error: productsError },
-    { data: orders, error: ordersError },
-    { count: customerCount, error: customersError },
-    { count: productCount, error: productCountError },
-    { count: supplierCount, error: suppliersError },
-    { data: inventoryRows, error: inventoryRowsError },
-    { count: lowStock, error: lowStockError },
-  ] = await Promise.all([
-    monthlyQuery,
-    productSalesQuery,
-    ordersQuery,
-    supabase.from('profiles').select('user_id', { count: 'exact', head: true }).eq('role', 'customer'),
-    supabase.from('products').select('product_id', { count: 'exact', head: true }).eq('status', 'Active'),
-    supabase.from('suppliers').select('supplier_id', { count: 'exact', head: true }),
-    inventoryQuery,
-    lowStockQuery,
-  ]);
-  if (monthlyError || productsError || ordersError || customersError || productCountError || suppliersError || inventoryRowsError || lowStockError) {
-    throw monthlyError || productsError || ordersError || customersError || productCountError || suppliersError || inventoryRowsError || lowStockError;
-  }
+     const monthlyQuery = supabase.from('sales_by_month').select('*').order('month_date');
+     const productSalesQuery = supabase.from('product_sales').select('id:product_id, name, category_id, category_name, revenue, units_sold, stock').order('revenue', { ascending: false });
+     const ordersQuery = supabase.from('orders').select('total_amount, status');
+     const inventoryQuery = supabase.from('inventory').select('stock_quantity');
+     const lowStockQuery = supabase.from('inventory').select('variant_id', { count: 'exact', head: true }).lt('stock_quantity', 10);
+     // Everything already expired plus everything inside the 60-day Near Expiry
+     // window — both are hidden from the storefront and refused at checkout.
+     const expiringQuery = supabase
+       .from('product_variants')
+       .select('variant_id, size, expiry_date, products(name), inventory(stock_quantity)')
+       .not('expiry_date', 'is', null)
+       .lte('expiry_date', new Date(Date.now() + NEAR_EXPIRY_DAYS * 86_400_000).toISOString().slice(0, 10))
+       .order('expiry_date', { ascending: true });
+     const [
+       { data: monthly, error: monthlyError },
+       { data: productSales, error: productsError },
+       { data: orders, error: ordersError },
+       { count: customerCount, error: customersError },
+       { count: productCount, error: productCountError },
+       { count: supplierCount, error: suppliersError },
+       { data: inventoryRows, error: inventoryRowsError },
+       { count: lowStock, error: lowStockError },
+       { data: expiring, error: expiringError },
+     ] = await Promise.all([
+       monthlyQuery,
+       productSalesQuery,
+       ordersQuery,
+       supabase.from('profiles').select('user_id', { count: 'exact', head: true }).eq('role', 'customer'),
+       supabase.from('products').select('product_id', { count: 'exact', head: true }).eq('status', 'Active'),
+       supabase.from('suppliers').select('supplier_id', { count: 'exact', head: true }),
+       inventoryQuery,
+       lowStockQuery,
+       expiringQuery,
+     ]);
+     if (monthlyError || productsError || ordersError || customersError || productCountError || suppliersError || inventoryRowsError || lowStockError || expiringError) {
+       throw monthlyError || productsError || ordersError || customersError || productCountError || suppliersError || inventoryRowsError || lowStockError || expiringError;
+     }
   const rows = Object.values((productSales || []).reduce((groups: Record<string, any>, row: any) => {
     const group = groups[row.id] || { ...row, revenue: 0, units_sold: 0, stock: 0 };
     group.revenue += Number(row.revenue || 0);
@@ -312,7 +467,6 @@ export async function fetchDashboardData() {
     salesData: salesByMonth,
     topProducts: rows.slice(0, 5).map(row => ({ name: row.name, sales: Number(row.revenue || 0) })),
     categoryData: Object.values(rows.reduce((groups: Record<string, { name: string; value: number }>, row: any) => {
-      if (row.category_name === 'Oral Care') return groups;
       const categoryKey = row.category_name === 'Personal Care' || row.category_name === 'Body Care'
         ? 'Personal & Body Care'
         : row.category_name || row.category_id || 'Uncategorized';
@@ -325,9 +479,26 @@ export async function fetchDashboardData() {
     customerCount: customerCount || 0,
     productCount: productCount || 0,
     supplierCount: supplierCount || 0,
-    inventoryUnits: (inventoryRows || []).reduce((sum, row) => sum + Number(row.stock_quantity || 0), 0),
-    lowStock: lowStock || 0,
-  };
+       inventoryUnits: (inventoryRows || []).reduce((sum, row) => sum + Number(row.stock_quantity || 0), 0),
+       lowStock: lowStock || 0,
+       expiringVariants: ((expiring || []) as any[]).map(row => {
+         const inventoryRow = Array.isArray(row.inventory) ? row.inventory[0] : row.inventory;
+         const product = Array.isArray(row.products) ? row.products[0] : row.products;
+         const expiryDate = row.expiry_date ? String(row.expiry_date).slice(0, 10) : null;
+         const status = expiryStatus(expiryDate);
+         return {
+           id: row.variant_id,
+           product: product?.name || 'Product',
+           variant: row.size || 'Standard',
+           expiryDate,
+           expiryLabel: formatExpiryDate(expiryDate),
+           status,
+           badge: expiryBadgeVariant(status),
+           stock: Number(inventoryRow?.stock_quantity || 0),
+           filter: status === 'Expired' ? 'expired' : 'near-expiry',
+         };
+       }),
+     };
 }
 
 export async function saveRecommendationRule(rule: { name: string; desc: string; priority: string }) {
